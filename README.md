@@ -58,16 +58,6 @@ Launch `GPUMonitor.app`. It runs entirely in the menu bar — there is no Dock i
 | Click **Quit** | Exit the application |
 | Adjust the **Interval** stepper | Change the sampling rate (100–2000 ms) |
 
-### Per-Process Data (Optional)
-
-By default, GPU Monitor shows aggregate GPU utilization. To see a breakdown by process:
-
-```bash
-sudo /path/to/GPUMonitor.app/Contents/MacOS/GPUMonitor
-```
-
-Without `sudo`, the sidebar displays a note: _"Run with sudo for per-process data."_
-
 ## How It Works
 
 GPU Monitor uses **IOKit** to query GPU hardware counters directly from the macOS kernel — no third-party tools or background daemons required.
