@@ -8,6 +8,9 @@ let package = Package(
         .executableTarget(
             name: "GPUMonitor",
             path: "Sources/GPUMonitor",
+            resources: [
+                .process("Assets.xcassets")
+            ],
             linkerSettings: [
                 .linkedFramework("IOKit"),
                 .linkedFramework("CoreFoundation")
