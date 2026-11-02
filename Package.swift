@@ -15,6 +15,11 @@ let package = Package(
                 .linkedFramework("IOKit"),
                 .linkedFramework("CoreFoundation")
             ]
+        ),
+        .testTarget(
+            name: "GPUMonitorTests",
+            dependencies: ["GPUMonitor"],
+            path: "Tests/GPUMonitorTests"
         )
     ]
 )

@@ -27,10 +27,6 @@ struct ContentView: View {
 
     private var header: some View {
         HStack(spacing: 8) {
-            Image(systemName: "square.grid.3x3.fill")
-                .foregroundStyle(.secondary)
-            Text(gpu.gpuName)
-                .font(.headline)
             Spacer()
             Stepper(value: $gpu.sampleIntervalMs, in: 100...2000, step: 100) {
                 Text(intervalLabel(gpu.sampleIntervalMs))
@@ -53,24 +49,45 @@ struct ContentView: View {
     // MARK: - Chart
 
     private var chartArea: some View {
-        ZStack {
-            GridLines()
-                .stroke(Color(nsColor: .separatorColor).opacity(0.4), lineWidth: 0.5)
+        HStack(spacing: 4) {
+            yAxisLabels
+            ZStack {
+                GridLines()
+                    .stroke(Color(nsColor: .separatorColor).opacity(0.7), lineWidth: 0.5)
 
-            Canvas { ctx, size in drawStacked(ctx: ctx, size: size) }
+                Canvas { ctx, size in drawStacked(ctx: ctx, size: size) }
 
-            if gpu.topProcessNames.isEmpty {
-                Text(gpu.permissionDenied ? "Run with sudo for per-process data" : "Collecting data…")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                if gpu.topProcessNames.isEmpty {
+                    Text(gpu.permissionDenied ? "Run with sudo for per-process data" : "Collecting data…")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+            .overlay(RoundedRectangle(cornerRadius: 6)
+                .stroke(Color(nsColor: .separatorColor), lineWidth: 0.5))
+            .padding(.trailing, 16)
+            .frame(minHeight: 100)
         }
-        .clipShape(RoundedRectangle(cornerRadius: 6))
-        .overlay(RoundedRectangle(cornerRadius: 6)
-            .stroke(Color(nsColor: .separatorColor), lineWidth: 0.5))
-        .padding(.horizontal, 16)
+        .padding(.leading, 16)
         .padding(.bottom, 4)
-        .frame(minHeight: 100)
+    }
+
+    private var yAxisLabels: some View {
+        VStack(spacing: 0) {
+            Text("100%")
+            Spacer()
+            Text("75%")
+            Spacer()
+            Text("50%")
+            Spacer()
+            Text("25%")
+            Spacer()
+            Text("0%")
+        }
+        .font(.caption2.monospacedDigit())
+        .foregroundStyle(.secondary)
+        .frame(width: 32, alignment: .trailing)
     }
 
     // MARK: - Time axis
@@ -85,7 +102,8 @@ struct ContentView: View {
         }
         .font(.caption2.monospacedDigit())
         .foregroundStyle(.secondary)
-        .padding(.horizontal, 16)
+        .padding(.leading, 52)
+        .padding(.trailing, 16)
         .padding(.bottom, 10)
     }
 
