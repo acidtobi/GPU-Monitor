@@ -4,15 +4,24 @@ import SwiftUI
 struct GPUMonitorApp: App {
     // Single shared data source — used by both the main window and the menu bar item.
     @StateObject private var gpu = GPUDataSource()
+    // Battery recording runs for the app's lifetime, with or without a window.
+    @StateObject private var battery: BatteryRecorder
     @AppStorage("isDarkMode") private var isDarkMode = false
 
+    init() {
+        // Created eagerly: StateObject would otherwise defer it until a window first asks for it.
+        let recorder = BatteryRecorder()
+        _battery = StateObject(wrappedValue: recorder)
+    }
+
     var body: some Scene {
-        WindowGroup {
-            ContentView()
+        WindowGroup("GPU Monitor") {
+            MainView()
                 .environmentObject(gpu)
+                .environmentObject(battery)
                 .preferredColorScheme(isDarkMode ? .dark : .light)
         }
-        .windowStyle(.hiddenTitleBar)
+        .windowStyle(.titleBar)
         .windowResizability(.contentMinSize)
         .defaultSize(width: 760, height: 300)
 

@@ -60,12 +60,12 @@ This protocol applies when ending a Beads implementation workflow. It is subordi
 
 ## Build & Test
 
-_Add your build and test commands here_
+Build: `swift build` (debug), `./build.sh` (release + packages GPUMonitor.app). Tests: `swift test` (XCTest, `Tests/GPUMonitorTests`, `@testable import GPUMonitor`).
 
 ```bash
-# Example:
-# npm install
-# npm test
+swift build
+swift test
+./build.sh   # replaces GPUMonitor.app; quit the running app first
 ```
 
 ## Architecture Overview

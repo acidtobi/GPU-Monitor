@@ -5,3 +5,8 @@
 .beads-credential-key
 .beads/proxieddb/
 *.gate.lock*
+
+# Build output and IDE files
+.build/
+.idea/
+GPUMonitor.app/
