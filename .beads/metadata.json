@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "gpumon",
+  "project_id": "efb2c667-3a99-4ff8-bf6b-9148b860d7ec"
+}
