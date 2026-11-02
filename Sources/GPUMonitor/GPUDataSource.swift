@@ -156,6 +156,18 @@ enum ChartPalette {
         hex(0x3FD4C4),   // teal
         hex(0xF2D63A),   // yellow
         hex(0xE87DC4),   // pink
+        hex(0xE84C7D),   // rose
+        hex(0x7D9BE8),   // periwinkle
+        hex(0x4CC49B),   // mint
+        hex(0xE8C44C),   // amber
+        hex(0xA04CE8),   // violet
+        hex(0x4CE8E8),   // cyan
+        hex(0xE8784C),   // coral
+        hex(0x7DE85B),   // lime
+        hex(0x4C7DE8),   // indigo
+        hex(0xE8A04C),   // peach
+        hex(0xC4E84C),   // chartreuse
+        hex(0xE84CA0),   // magenta
     ]
 
     private static func hex(_ v: UInt32) -> CGColor {
