@@ -364,8 +364,12 @@ private struct ChartWidthKey: PreferenceKey {
 
 /// One time series drawn from per-pixel columns in the given style: a line (with an area down to
 /// zero when there's no band) and/or a shaded band. Values above zero use positiveColor, below
-/// zero negativeColor.
+/// zero negativeColor. Recording gaps are bridged in grey and labelled "offline".
 private struct BatteryChart: View {
+    private static let gapLineColor = Color(white: 0.55)  // grey
+    private static let gapFillColor = Color(white: 0.32)  // dark grey
+    private static let gapLabel = "offline"
+
     let title: String
     let value: String?
     let lower: Double
@@ -444,7 +448,8 @@ private struct BatteryChart: View {
         let opacities = bandOpacities
         var bands = opacities.map { _ in Path() }
         var area = Path(), line = Path(), dots = Path()
-        for run in columns(Int(size.width)) {
+        let runs = columns(Int(size.width))
+        for run in runs {
             let xs = run.map { CGFloat($0.x) }
             let edges = run.map { style.bands($0.summary) }
             for j in bands.indices {
@@ -487,6 +492,71 @@ private struct BatteryChart: View {
             for (band, opacity) in zip(bands, opacities) { layer.fill(band, with: .color(color.opacity(opacity))) }
             layer.stroke(line, with: .color(color), lineWidth: 1)
             layer.fill(dots, with: .color(color))
+        }
+
+        for (before, after) in zip(runs, runs.dropFirst()) {
+            drawGap(ctx, size, from: before[before.count - 1], to: after[0], zero: zero, y: y)
+        }
+    }
+
+    /// A recording gap (asleep, app not running) between two runs: the edge columns joined by
+    /// straight lines in grey, the filled part (outermost band, or the area down to zero when
+    /// there's no band) in dark grey with a white label in its middle. Where that part is too
+    /// thin for the label, the label goes above or below it in the secondary color instead.
+    private func drawGap(_ ctx: GraphicsContext, _ size: CGSize, from a: BatteryBuckets.Column,
+                         to b: BatteryBuckets.Column, zero: CGFloat, y: (Float) -> CGFloat) {
+        let x0 = CGFloat(a.x), x1 = CGFloat(b.x)
+        guard x1 > x0 else { return }
+
+        // The filled part's two edges as y at x0 and x1, like the data: bands half a point wider.
+        let lineA = style.line(a.summary).map(y), lineB = style.line(b.summary).map(y)
+        let edges: (top: (CGFloat, CGFloat), bottom: (CGFloat, CGFloat))
+        if let bandA = style.bands(a.summary).first, let bandB = style.bands(b.summary).first {
+            edges = ((y(bandA.high) - 0.5, y(bandB.high) - 0.5), (y(bandA.low) + 0.5, y(bandB.low) + 0.5))
+        } else if let lineA, let lineB {
+            edges = ((lineA, lineB), (zero, zero))
+        } else {
+            return
+        }
+        var fill = Path()
+        fill.move(to: CGPoint(x: x0, y: edges.top.0))
+        fill.addLine(to: CGPoint(x: x1, y: edges.top.1))
+        fill.addLine(to: CGPoint(x: x1, y: edges.bottom.1))
+        fill.addLine(to: CGPoint(x: x0, y: edges.bottom.0))
+        fill.closeSubpath()
+        ctx.fill(fill, with: .color(Self.gapFillColor))
+        if let lineA, let lineB {
+            var line = Path()
+            line.move(to: CGPoint(x: x0, y: lineA))
+            line.addLine(to: CGPoint(x: x1, y: lineB))
+            ctx.stroke(line, with: .color(Self.gapLineColor), lineWidth: 1)
+        }
+
+        // Label: centered on the gap, only if the gap is wide enough.
+        let font = Font.caption2
+        let textSize = ctx.resolve(Text(Self.gapLabel).font(font)).measure(in: size)
+        let mid = (x0 + x1) / 2
+        let half = textSize.width / 2 + 3
+        guard x1 - x0 >= 2 * half + 4 else { return }
+        // Both edges are straight, so the filled part fits the label's box iff it covers the box at
+        // the box's left and right ends: the span between the edges at both ends, intersected.
+        func at(_ e: (CGFloat, CGFloat), _ x: CGFloat) -> CGFloat { e.0 + (e.1 - e.0) * (x - x0) / (x1 - x0) }
+        let ends = [mid - half, mid + half].map { x in
+            (min(at(edges.top, x), at(edges.bottom, x)), max(at(edges.top, x), at(edges.bottom, x)))
+        }
+        let inside = (ends.map(\.0).max()!, ends.map(\.1).min()!)
+        let outside = (ends.map(\.0).min()!, ends.map(\.1).max()!)
+        let height = textSize.height + 2
+        if inside.1 - inside.0 >= height {
+            let center = CGPoint(x: mid, y: (inside.0 + inside.1) / 2)
+            // A dark grey backdrop keeps a line through the band from crossing the text.
+            ctx.fill(Path(CGRect(x: center.x - half, y: center.y - height / 2, width: 2 * half, height: height)),
+                     with: .color(Self.gapFillColor))
+            ctx.draw(ctx.resolve(Text(Self.gapLabel).font(font).foregroundColor(.white)), at: center)
+        } else if outside.0 >= height || size.height - outside.1 >= height {
+            let y = outside.0 >= height ? outside.0 - height / 2 : outside.1 + height / 2
+            ctx.draw(ctx.resolve(Text(Self.gapLabel).font(font).foregroundColor(.secondary)),
+                     at: CGPoint(x: mid, y: y))
         }
     }
 
