@@ -1,7 +1,40 @@
 import Foundation
 import IOKit
+import SystemConfiguration
 
-/// One recorded battery tick. These three values are what BatteryStore persists.
+/// The Energy Mode chosen in Battery settings for the current power source.
+/// Raw values are what `pmset -g` prints as `powermode`.
+enum PowerMode: UInt8, CaseIterable, Equatable {
+    case automatic = 0
+    case low = 1
+    case high = 2
+
+    var label: String {
+        switch self {
+        case .automatic: "Automatic"
+        case .low:       "Low Power"
+        case .high:      "High Power"
+        }
+    }
+
+    /// Decodes powerd's active settings. "LowPowerMode" holds all three modes despite its name;
+    /// "HighPowerMode" = 1 is how macOS 12 marked High Power on the first Macs that had it.
+    init?(settings: [String: Any]) {
+        if (settings["HighPowerMode"] as? NSNumber)?.intValue == 1 { self = .high; return }
+        guard let raw = (settings["LowPowerMode"] as? NSNumber)?.intValue,
+              let mode = PowerMode(rawValue: UInt8(clamping: raw)) else { return nil }
+        self = mode
+    }
+
+    /// Reads the mode for the power source in use. nil when powerd doesn't publish one.
+    static func current() -> PowerMode? {
+        guard let settings = SCDynamicStoreCopyValue(nil, "State:/IOKit/PowerManagement/CurrentSettings" as CFString)
+                as? [String: Any] else { return nil }
+        return PowerMode(settings: settings)
+    }
+}
+
+/// One recorded battery tick. These values are what BatteryStore persists.
 struct BatterySample: Equatable {
     let timestamp: Date
     /// State of charge, 0…100.
@@ -10,6 +43,8 @@ struct BatterySample: Equatable {
     let systemPowerW: Double?
     /// Battery power in watts: positive while charging, negative while discharging.
     let batteryPowerW: Double?
+    /// Energy Mode at the time. nil when unknown.
+    var powerMode: PowerMode? = nil
 }
 
 /// Charger state shown next to the live values. Not recorded.
@@ -25,8 +60,8 @@ struct BatteryReading: Equatable {
 }
 
 /// Reads charge and charger state from the AppleSmartBattery IORegistry entry and power from the
-/// SMC. The IORegistry only refreshes about once a minute; the SMC power keys update every second.
-/// Does NOT require root.
+/// SMC, and the Energy Mode from powerd. The IORegistry only refreshes about once a minute; the SMC
+/// power keys update every second. Does NOT require root.
 final class BatterySampler {
 
     private let smc = SMC()
@@ -76,7 +111,8 @@ final class BatterySampler {
             sample: BatterySample(timestamp: timestamp,
                                   chargePct: chargePct,
                                   systemPowerW: systemPowerW,
-                                  batteryPowerW: batteryPowerW),
+                                  batteryPowerW: batteryPowerW,
+                                  powerMode: PowerMode.current()),
             status: status
         )
     }

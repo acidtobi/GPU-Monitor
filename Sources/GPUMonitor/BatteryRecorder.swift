@@ -98,7 +98,8 @@ final class BatteryRecorder: ObservableObject {
                 let s = reading.sample
                 lastRecorded = RecordedSample(
                     sample: BatterySample(timestamp: stored, chargePct: s.chargePct,
-                                          systemPowerW: s.systemPowerW, batteryPowerW: s.batteryPowerW),
+                                          systemPowerW: s.systemPowerW, batteryPowerW: s.batteryPowerW,
+                                          powerMode: s.powerMode),
                     interval: interval)
             }
             storeError = nil

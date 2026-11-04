@@ -1,7 +1,7 @@
 import SwiftUI
 
-/// Battery monitor tab: live values, recording interval, display range and three charts
-/// (charge %, system power, battery power) on a shared time axis.
+/// Battery monitor tab: live values, recording interval, display range, an Energy Mode bar and
+/// three charts (charge %, system power, battery power) on a shared time axis.
 struct BatteryView: View {
     @EnvironmentObject private var recorder: BatteryRecorder
     @AppStorage("batteryRange") private var range: BatteryRange = .h1
@@ -40,10 +40,20 @@ private struct BatteryCharts: View {
     private static let chargingColor = Color(cgColor: ChartPalette.colors[1])    // green
     private static let dischargingColor = Color(cgColor: ChartPalette.colors[4]) // red
 
+    static func color(_ mode: PowerMode) -> Color {
+        switch mode {
+        case .automatic: Color(nsColor: .systemGray)
+        case .low:       Color(cgColor: ChartPalette.colors[6])  // yellow, as macOS shows Low Power
+        case .high:      Color(cgColor: ChartPalette.colors[8])  // rose
+        }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             header
             VStack(spacing: 6) {
+                PowerModeBar(spans: history.buckets.modeSpans, windowStart: history.windowStart,
+                             range: range.seconds, yAxisWidth: Self.yAxisWidth)
                 chargeChart
                 systemChart
                 batteryChart
@@ -76,6 +86,15 @@ private struct BatteryCharts: View {
 
             Spacer()
 
+            // Legend for the mode bar; the current mode is emphasized. Shrinks when narrow.
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 8) {
+                    ForEach(PowerMode.allCases, id: \.self) { modeLabel($0) }
+                }
+                if let mode = currentMode { modeLabel(mode) }
+                if let mode = currentMode { modeDot(mode).help("Energy Mode: \(mode.label)") }
+            }
+
             if let error = recorder.storeError {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .foregroundStyle(.orange)
@@ -105,6 +124,23 @@ private struct BatteryCharts: View {
         .padding(.horizontal, 16)
         .padding(.top, 14)
         .padding(.bottom, 8)
+    }
+
+    private var currentMode: PowerMode? { recorder.latest?.sample.powerMode }
+
+    private func modeDot(_ mode: PowerMode) -> some View {
+        Circle().fill(Self.color(mode)).frame(width: 8, height: 8)
+    }
+
+    private func modeLabel(_ mode: PowerMode) -> some View {
+        HStack(spacing: 4) {
+            modeDot(mode)
+            Text(mode.label)
+                .font(.caption)
+                .fontWeight(mode == currentMode ? .semibold : .regular)
+                .foregroundStyle(mode == currentMode ? .primary : .secondary)
+                .fixedSize()
+        }
     }
 
     private var statusText: String {
@@ -214,6 +250,56 @@ private struct BatteryCharts: View {
     static func signedWatts(_ v: Double) -> String {
         let sign = v >= 0.05 ? "+" : v <= -0.05 ? "−" : ""
         return sign + String(format: "%.1f W", v.magnitude)
+    }
+}
+
+// MARK: - Energy Mode bar
+
+/// Strip above the charts: one block per continuous stretch in one Energy Mode, in that mode's
+/// color, labelled with its duration where it fits. Empty where nothing was recorded or the mode
+/// is unknown (history from before it was recorded).
+private struct PowerModeBar: View {
+    let spans: [BatteryBuckets.ModeSpan]
+    let windowStart: TimeInterval
+    let range: TimeInterval
+    let yAxisWidth: CGFloat
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Text("Mode")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .frame(width: yAxisWidth, alignment: .trailing)
+            Canvas { ctx, size in draw(ctx, size) }
+                .clipShape(RoundedRectangle(cornerRadius: 4))
+                .overlay(RoundedRectangle(cornerRadius: 4)
+                    .stroke(Color(nsColor: .separatorColor), lineWidth: 0.5))
+        }
+        .frame(height: 20)
+    }
+
+    private func draw(_ ctx: GraphicsContext, _ size: CGSize) {
+        guard range > 0 else { return }
+        let scale = size.width / range
+        for span in spans {
+            // At least a pixel wide, so a brief switch stays visible at long ranges.
+            let x0 = max(0, (span.start - windowStart) * scale)
+            let x1 = min(size.width, max(x0 + 1, (span.end - windowStart) * scale))
+            guard x1 > x0 else { continue }
+            let rect = CGRect(x: x0, y: 0, width: x1 - x0, height: size.height)
+            ctx.fill(Path(rect), with: .color(BatteryCharts.color(span.mode)))
+
+            // The full label if it fits, else just the duration, else nothing. Black reads on all
+            // three mode colors in light and dark mode.
+            let duration = span.durationLabel
+            for label in ["\(span.mode.label): \(duration)", duration] {
+                let text = ctx.resolve(Text(label).font(.caption2.monospacedDigit()).foregroundColor(.black))
+                if text.measure(in: size).width + 8 <= rect.width {
+                    ctx.draw(text, at: CGPoint(x: rect.midX, y: rect.midY))
+                    break
+                }
+            }
+        }
     }
 }
 
