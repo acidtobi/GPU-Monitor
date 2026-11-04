@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <title>Option 4: Gauge</title>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#3CC8D3"/>
+      <stop offset="1" stop-color="#136F8A"/>
+    </linearGradient>
+    <linearGradient id="orange" x1="0" y1="1" x2="1" y2="0">
+      <stop offset="0" stop-color="#F2551D"/>
+      <stop offset="1" stop-color="#FFA332"/>
+    </linearGradient>
+    <linearGradient id="slate" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2E414A"/>
+      <stop offset="1" stop-color="#1D2A30"/>
+    </linearGradient>
+    <linearGradient id="sheen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.18"/>
+      <stop offset="0.5" stop-color="#FFFFFF" stop-opacity="0"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="10" stdDeviation="12" flood-color="#000" flood-opacity="0.28"/>
+    </filter>
+    <clipPath id="tile"><rect x="100" y="100" width="824" height="824" rx="185"/></clipPath>
+  </defs>
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#bg)" filter="url(#shadow)"/>
+  <g clip-path="url(#tile)">
+    <path d="M314,758 A280,280 0 1 1 710,758" fill="none" stroke="#FFFFFF" stroke-opacity="0.22" stroke-width="64" stroke-linecap="round"/>
+    <path d="M314,758 A280,280 0 1 1 741,399" fill="none" stroke="url(#orange)" stroke-width="64" stroke-linecap="round"/>
+    <circle cx="741" cy="399" r="20" fill="#FFE7A3"/>
+    <rect x="443" y="424" width="26" height="44" rx="13" fill="url(#orange)"/>
+    <rect x="443" y="652" width="26" height="44" rx="13" fill="url(#orange)"/>
+    <rect x="376" y="491" width="44" height="26" rx="13" fill="url(#orange)"/>
+    <rect x="604" y="491" width="44" height="26" rx="13" fill="url(#orange)"/>
+    <rect x="499" y="424" width="26" height="44" rx="13" fill="url(#orange)"/>
+    <rect x="499" y="652" width="26" height="44" rx="13" fill="url(#orange)"/>
+    <rect x="376" y="547" width="44" height="26" rx="13" fill="url(#orange)"/>
+    <rect x="604" y="547" width="44" height="26" rx="13" fill="url(#orange)"/>
+    <rect x="555" y="424" width="26" height="44" rx="13" fill="url(#orange)"/>
+    <rect x="555" y="652" width="26" height="44" rx="13" fill="url(#orange)"/>
+    <rect x="376" y="603" width="44" height="26" rx="13" fill="url(#orange)"/>
+    <rect x="604" y="603" width="44" height="26" rx="13" fill="url(#orange)"/>
+    <rect x="412" y="460" width="200" height="200" rx="48" fill="url(#slate)"/>
+    <polyline points="450,600 492,556 530,584 576,524" fill="none" stroke="#FFE7A3" stroke-width="18" stroke-linecap="round" stroke-linejoin="round"/>
+    <rect x="100" y="100" width="824" height="824" fill="url(#sheen)"/>
+  </g>
+</svg>
