@@ -1,7 +1,7 @@
 import SwiftUI
 
-/// Battery monitor tab: live values, recording interval, display range and three charts
-/// (charge %, system power, battery power) on a shared time axis.
+/// Battery monitor tab: live values, recording interval, display range, a power source bar and
+/// three charts (charge %, system power, battery power) on a shared time axis.
 struct BatteryView: View {
     @EnvironmentObject private var recorder: BatteryRecorder
     @AppStorage("batteryRange") private var range: BatteryRange = .h1
@@ -45,6 +45,8 @@ private struct BatteryCharts: View {
         VStack(spacing: 0) {
             header
             VStack(spacing: 6) {
+                PowerBar(spans: history.buckets.powerSpans, windowStart: history.windowStart,
+                         range: range.seconds, yAxisWidth: Self.yAxisWidth)
                 chargeChart
                 systemChart
                 batteryChart
@@ -233,6 +235,58 @@ private struct BatteryCharts: View {
     static func signedWatts(_ v: Double) -> String {
         let sign = v >= 0.05 ? "+" : v <= -0.05 ? "−" : ""
         return sign + String(format: "%.1f W", v.magnitude)
+    }
+}
+
+// MARK: - Power source bar
+
+/// Strip above the charts: one block per continuous stretch on AC (dark green) or battery
+/// (dark grey), labelled with its duration where it fits. Empty where nothing was recorded or the
+/// AC state is unknown (history from before it was recorded).
+private struct PowerBar: View {
+    let spans: [BatteryBuckets.PowerSpan]
+    let windowStart: TimeInterval
+    let range: TimeInterval
+    let yAxisWidth: CGFloat
+
+    private static let acColor = Color(red: 0.12, green: 0.42, blue: 0.2)  // dark green
+    private static let batteryColor = Color(white: 0.32)                  // dark grey
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Text("Power")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .frame(width: yAxisWidth, alignment: .trailing)
+            Canvas { ctx, size in draw(ctx, size) }
+                .clipShape(RoundedRectangle(cornerRadius: 4))
+                .overlay(RoundedRectangle(cornerRadius: 4)
+                    .stroke(Color(nsColor: .separatorColor), lineWidth: 0.5))
+        }
+        .frame(height: 20)
+    }
+
+    private func draw(_ ctx: GraphicsContext, _ size: CGSize) {
+        guard range > 0 else { return }
+        let scale = size.width / range
+        for span in spans {
+            // At least a pixel wide, so a brief plug-in stays visible at long ranges.
+            let x0 = max(0, (span.start - windowStart) * scale)
+            let x1 = min(size.width, max(x0 + 1, (span.end - windowStart) * scale))
+            guard x1 > x0 else { continue }
+            let rect = CGRect(x: x0, y: 0, width: x1 - x0, height: size.height)
+            ctx.fill(Path(rect), with: .color(span.ac ? Self.acColor : Self.batteryColor))
+
+            // The full label if it fits, else just the duration, else nothing.
+            let duration = span.durationLabel
+            for label in ["\(span.ac ? "AC" : "Battery") power: \(duration)", duration] {
+                let text = ctx.resolve(Text(label).font(.caption2.monospacedDigit()).foregroundColor(.white))
+                if text.measure(in: size).width + 8 <= rect.width {
+                    ctx.draw(text, at: CGPoint(x: rect.midX, y: rect.midY))
+                    break
+                }
+            }
+        }
     }
 }
 

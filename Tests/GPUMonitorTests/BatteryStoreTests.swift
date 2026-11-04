@@ -18,8 +18,9 @@ final class BatteryStoreTests: XCTestCase {
 
     // MARK: - Helpers
 
-    func sample(_ t: Double, pct: Double = 50, sys: Double? = 12.34, bat: Double? = -5.67) -> BatterySample {
-        BatterySample(timestamp: Date(timeIntervalSince1970: t), chargePct: pct, systemPowerW: sys, batteryPowerW: bat)
+    func sample(_ t: Double, pct: Double = 50, sys: Double? = 12.34, bat: Double? = -5.67, ac: Bool? = false) -> BatterySample {
+        BatterySample(timestamp: Date(timeIntervalSince1970: t), chargePct: pct, systemPowerW: sys, batteryPowerW: bat,
+                      acPower: ac)
     }
 
     func makeStore() -> BatteryStore { BatteryStore(directory: dir, flushInterval: 0) }
@@ -63,12 +64,56 @@ final class BatteryStoreTests: XCTestCase {
         XCTAssertEqual(BatteryStore.encodePct(150), 10_000)
         XCTAssertEqual(BatteryStore.encodePct(.nan), 0)
         XCTAssertLessThan(BatteryStore.encodePct(100), BatteryStore.segmentMarker, "a sample never looks like a segment header")
+        XCTAssertNotEqual(BatteryStore.encodeCharge(100, acPower: true), BatteryStore.segmentMarker, "not with AC bits either")
+        XCTAssertNotEqual(BatteryStore.encodeCharge(100, acPower: false), BatteryStore.segmentMarker)
+        XCTAssertGreaterThan(BatteryStore.pctMask, BatteryStore.encodePct(100), "AC bits don't overlap the charge")
+        for ac in [true, false, nil] as [Bool?] {
+            let word = BatteryStore.encodeCharge(87.65, acPower: ac)
+            XCTAssertEqual(BatteryStore.decodeACPower(word), ac)
+            XCTAssertEqual(word & BatteryStore.pctMask, 8_765)
+        }
         XCTAssertEqual(BatteryStore.encodePower(nil), BatteryStore.missingPower)
         XCTAssertEqual(BatteryStore.encodePower(.infinity), BatteryStore.missingPower)
         XCTAssertEqual(BatteryStore.encodePower(-1e9), BatteryStore.missingPower + 1)
         XCTAssertEqual(BatteryStore.encodePower(1e9), Int16.max)
         XCTAssertEqual(BatteryStore.encodePower(-0.004), 0)
         XCTAssertTrue(BatteryStore.decodePower(BatteryStore.missingPower).isNaN)
+    }
+
+    func testACPowerRoundTrip() throws {
+        let store = makeStore()
+        for (i, ac) in ([true, false, nil, true] as [Bool?]).enumerated() {
+            try store.append(sample(day0 + Double(i), pct: 100, ac: ac), interval: 1)
+        }
+        try store.close()
+
+        let g = try XCTUnwrap(read(day0, day0 + 10).first)
+        XCTAssertEqual(g.acPower, [true, false, nil, true])
+        XCTAssertEqual(g.chargePct, [100, 100, 100, 100], "AC bits don't leak into the charge")
+        XCTAssertEqual(read(day0 + 1, day0 + 2).first?.acPower, [false, nil], "trimmed with the other series")
+    }
+
+    func testVersion1FileIsReadAndUpgraded() throws {
+        // A v1 file: header, one segment of two samples at 42 %, no AC bits.
+        var data = Data(BatteryStore.magic) + [1, 0, 0, 0]
+        data += [0xFF, 0xFF, 0x01, 0x00] + withUnsafeBytes(of: UInt32(day0 + 10).littleEndian, Array.init)
+        for _ in 0..<2 { data += [0x68, 0x10, 0x00, 0x00, 0x00, 0x00] }  // 4200, 0 W, 0 W
+        try data.write(to: file(day: 20_000))
+
+        let v1 = read(day0, day0 + 100)
+        XCTAssertEqual(v1.map(\.count), [2])
+        XCTAssertEqual(v1[0].chargePct, [42, 42])
+        XCTAssertEqual(v1[0].acPower, [nil, nil], "v1 has no AC state")
+
+        let store = makeStore()
+        try store.append(sample(day0 + 20, ac: true), interval: 1)
+        try store.close()
+
+        let bytes = try Data(contentsOf: file(day: 20_000))
+        XCTAssertEqual(bytes[BatteryStore.magic.count], BatteryStore.version, "header upgraded in place")
+        let segs = read(day0, day0 + 100)
+        XCTAssertEqual(segs.map(\.count), [2, 1], "old samples kept")
+        XCTAssertEqual(segs[1].acPower, [true])
     }
 
     func testAppendReturnsStoredTimestamp() throws {
