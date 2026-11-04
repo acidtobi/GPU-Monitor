@@ -44,6 +44,58 @@ enum BatteryRange: Int, CaseIterable, Identifiable {
     }
 }
 
+/// How a chart column sums up the samples that fall into it.
+enum ChartStyle: String, CaseIterable, Identifiable {
+    /// Mean line over an area down to zero.
+    case average
+    /// Band from the smallest to the largest sample.
+    case minMax
+    /// Mean line inside a band holding the middle 95% of the samples.
+    case averageBand
+    /// A box plot per column: median line, a band for the middle half of the samples and a
+    /// faint one from the smallest to the largest.
+    case quartiles
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .average:     "Average"
+        case .minMax:      "Min–max band"
+        case .averageBand: "Average + 95% band"
+        case .quartiles:   "Median + quartiles"
+        }
+    }
+
+    var help: String {
+        switch self {
+        case .average:     "average per pixel"
+        case .minMax:      "band from minimum to maximum per pixel"
+        case .averageBand: "average per pixel, band where the middle 95% of the samples lie"
+        case .quartiles:   "median per pixel, band for the middle 50% of the samples, faint band from minimum to maximum"
+        }
+    }
+
+    /// Value the line passes through; nil if this style draws no line.
+    func line(_ s: Summary) -> Float? {
+        switch self {
+        case .average, .averageBand: s.mean
+        case .quartiles:             s.median
+        case .minMax:                nil
+        }
+    }
+
+    /// Bottom and top of the shaded bands, outermost first.
+    func bands(_ s: Summary) -> [(low: Float, high: Float)] {
+        switch self {
+        case .average:     []
+        case .minMax:      [(s.min, s.max)]
+        case .averageBand: [(s.p2_5, s.p97_5)]
+        case .quartiles:   [(s.min, s.max), (s.p25, s.p75)]
+        }
+    }
+}
+
 /// Smallest and largest value seen; NaN while empty. NaN inputs (missing values) are ignored.
 struct MinMax: Equatable {
     var min: Float = .nan
@@ -57,26 +109,78 @@ struct MinMax: Equatable {
     }
 }
 
-/// Battery history reduced to min/max per fixed time bucket, split into runs at recording gaps.
-///
-/// Buckets are aligned to absolute time (index = unix seconds / bucketSeconds), so as the window
-/// slides, buckets are only added at the end and dropped at the start. Keeping min and max rather
-/// than averages keeps short spikes visible at every zoom level.
-///
-/// The Energy Mode is kept at full resolution instead, as spans of unchanged mode.
-struct BatteryBuckets {
-    struct Bucket: Equatable {
-        let index: Int
-        var charge = MinMax()
-        var system = MinMax()
-        var battery = MinMax()
+/// One series summed up over one bucket, with everything each ChartStyle needs.
+/// All NaN while the bucket has no values for the series.
+struct Summary {
+    var min: Float = .nan
+    var max: Float = .nan
+    var mean: Float = .nan
+    var median: Float = .nan
+    /// Percentiles: the middle 95% of the samples lie between p2_5 and p97_5, the middle half
+    /// between p25 and p75.
+    var p2_5: Float = .nan
+    var p25: Float = .nan
+    var p75: Float = .nan
+    var p97_5: Float = .nan
+
+    var isEmpty: Bool { mean.isNaN }
+
+    init() {}
+
+    /// NaN values (missing) are ignored.
+    init(_ values: [Float]) {
+        var sorted = values.filter { !$0.isNaN }
+        guard !sorted.isEmpty else { return }
+        sorted.sort()
+        min = sorted[0]
+        max = sorted[sorted.count - 1]
+        mean = Float(sorted.reduce(0.0) { $0 + Double($1) } / Double(sorted.count))
+        median = Self.quantile(sorted, 0.5)
+        p2_5 = Self.quantile(sorted, 0.025)
+        p25 = Self.quantile(sorted, 0.25)
+        p75 = Self.quantile(sorted, 0.75)
+        p97_5 = Self.quantile(sorted, 0.975)
     }
 
-    /// One pixel column of a chart.
-    struct Column: Equatable {
-        let x: Int
-        let min: Float
-        let max: Float
+    /// Quantile of sorted values, interpolating between the two closest ranks (R-7, numpy's default).
+    static func quantile(_ sorted: [Float], _ p: Double) -> Float {
+        let h = Double(sorted.count - 1) * p
+        let i = Int(h.rounded(.down))
+        guard i + 1 < sorted.count else { return sorted[i] }
+        return sorted[i] + Float(h - Double(i)) * (sorted[i + 1] - sorted[i])
+    }
+}
+
+/// Battery history summed up per fixed time bucket, split into runs at recording gaps.
+///
+/// A bucket is one pixel column wide (range / columns seconds) and aligned to absolute time
+/// (index = unix seconds / bucketSeconds), so as the window slides the columns scroll along
+/// unchanged: buckets are only added at the end and dropped at the start.
+///
+/// The AC state and Energy Mode are kept at full resolution instead, as spans of unchanged value.
+struct BatteryBuckets {
+    struct Bucket {
+        let index: Int
+        var charge = Summary()
+        var system = Summary()
+        var battery = Summary()
+    }
+
+    /// One pixel column of a chart. `x` is the column's center in pixels from the left edge.
+    struct Column {
+        let x: Double
+        let summary: Summary
+    }
+
+    /// A continuous stretch on AC or on battery power. Holds from its first sample until the next
+    /// sample in its run, so back-to-back spans meet without a gap.
+    struct PowerSpan: Equatable {
+        let ac: Bool
+        var start: TimeInterval
+        var end: TimeInterval
+
+        var duration: TimeInterval { end - start }
+        var durationLabel: String { BatteryBuckets.durationLabel(duration) }
     }
 
     /// A continuous stretch in one Energy Mode. Holds from its first sample until the next sample
@@ -87,57 +191,67 @@ struct BatteryBuckets {
         var end: TimeInterval
 
         var duration: TimeInterval { end - start }
-
-        /// "45s", "12m", "5h 12m", "2d 3h".
-        var durationLabel: String {
-            let s = Int(duration.rounded())
-            if s < 60 { return "\(s)s" }
-            let m = s / 60
-            if m < 60 { return "\(m)m" }
-            if m < 1_440 { return "\(m / 60)h \(m % 60)m" }
-            return "\(m / 1_440)d \(m % 1_440 / 60)h"
-        }
+        var durationLabel: String { BatteryBuckets.durationLabel(duration) }
     }
 
-    /// Buckets per displayed range. More than any chart is wide, so `columns` can merge them.
-    static let bucketsPerRange = 2_000
+    /// "45s", "12m", "5h 12m", "2d 3h".
+    static func durationLabel(_ duration: TimeInterval) -> String {
+        let s = Int(duration.rounded())
+        if s < 60 { return "\(s)s" }
+        let m = s / 60
+        if m < 60 { return "\(m)m" }
+        if m < 1_440 { return "\(m / 60)h \(m % 60)m" }
+        return "\(m / 1_440)d \(m % 1_440 / 60)h"
+    }
+
     /// Consecutive samples further apart than this many intervals are separated by a gap.
     static let gapFactor = 1.5
+
+    private static let series: [WritableKeyPath<Bucket, Summary>] = [\.charge, \.system, \.battery]
+
+    /// Raw samples of the newest bucket, whose summaries change with every sample added.
+    /// Values are indexed like `series`.
+    private struct OpenBucket {
+        let index: Int
+        var values: [[Float]] = [[], [], []]
+        /// Samples were added since the summaries were last computed.
+        var dirty = false
+    }
 
     let bucketSeconds: TimeInterval
     /// Oldest first. Within a run samples are contiguous; draw each run as its own line.
     private(set) var runs: [[Bucket]] = []
+    /// Oldest first. Recording gaps and samples with unknown AC state end a span.
+    private(set) var powerSpans: [PowerSpan] = []
     /// Oldest first. Recording gaps and samples with unknown mode end a span.
     private(set) var modeSpans: [ModeSpan] = []
     private(set) var lastTime: TimeInterval?
     private var lastInterval: TimeInterval = 0
+    /// The last bucket of the last run.
+    private var open: OpenBucket?
+    /// Whether the last span is still being extended by new samples.
+    private var spanOpen = false
     /// Whether the last mode span is still being extended by new samples.
     private var modeSpanOpen = false
 
-    init(range: TimeInterval) {
-        bucketSeconds = range / Double(Self.bucketsPerRange)
+    /// Buckets for a chart `columns` pixels wide showing `range` seconds.
+    init(range: TimeInterval, columns: Int) {
+        bucketSeconds = range / Double(Swift.max(1, columns))
     }
 
     /// Adds one sample. Samples must arrive in time order; anything not newer than the last is ignored.
     mutating func add(time t: TimeInterval, interval: TimeInterval, charge: Float, system: Float, battery: Float,
-                      mode: PowerMode? = nil) {
-        if let last = lastTime {
-            guard t > last else { return }
-            if t - last > Self.gapFactor * Swift.max(interval, lastInterval) { runs.append([]); modeSpanOpen = false }
-        } else {
-            runs.append([])
-        }
-        lastTime = t
-        lastInterval = interval
-        addMode(mode, at: t)
+                      acPower: Bool? = nil, mode: PowerMode? = nil) {
+        append(time: t, interval: interval, values: [charge, system, battery], acPower: acPower, mode: mode)
+        summarizeOpen()
+    }
 
-        let r = runs.count - 1
-        let index = Int((t / bucketSeconds).rounded(.down))
-        if runs[r].last?.index != index { runs[r].append(Bucket(index: index)) }
-        let b = runs[r].count - 1
-        runs[r][b].charge.add(charge)
-        runs[r][b].system.add(system)
-        runs[r][b].battery.add(battery)
+    private mutating func addPower(_ ac: Bool?, at t: TimeInterval) {
+        if spanOpen { powerSpans[powerSpans.count - 1].end = t }
+        guard let ac else { spanOpen = false; return }
+        if spanOpen && powerSpans[powerSpans.count - 1].ac == ac { return }
+        powerSpans.append(PowerSpan(ac: ac, start: t, end: t))
+        spanOpen = true
     }
 
     private mutating func addMode(_ mode: PowerMode?, at t: TimeInterval) {
@@ -151,10 +265,12 @@ struct BatteryBuckets {
     mutating func add(_ segment: BatterySegment) {
         let start = segment.start.timeIntervalSince1970
         for i in 0..<segment.count {
-            add(time: start + Double(i) * segment.interval, interval: segment.interval,
-                charge: segment.chargePct[i], system: segment.systemPowerW[i], battery: segment.batteryPowerW[i],
-                mode: i < segment.powerMode.count ? segment.powerMode[i] : nil)
+            append(time: start + Double(i) * segment.interval, interval: segment.interval,
+                   values: [segment.chargePct[i], segment.systemPowerW[i], segment.batteryPowerW[i]],
+                   acPower: i < segment.acPower.count ? segment.acPower[i] : nil,
+                   mode: i < segment.powerMode.count ? segment.powerMode[i] : nil)
         }
+        summarizeOpen()
     }
 
     mutating func add(_ recorded: RecordedSample) {
@@ -163,14 +279,66 @@ struct BatteryBuckets {
             charge: Float(s.chargePct),
             system: Float(s.systemPowerW ?? .nan),
             battery: Float(s.batteryPowerW ?? .nan),
+            acPower: s.acPower,
             mode: s.powerMode)
     }
 
-    /// Drops buckets that end before `time` and cuts mode spans off at `time`.
+    /// Adds a sample to its bucket. The newest bucket is summed up when it's complete or by
+    /// summarizeOpen(), so a bulk load sorts each bucket once.
+    private mutating func append(time t: TimeInterval, interval: TimeInterval, values: [Float],
+                                 acPower: Bool?, mode: PowerMode?) {
+        if let last = lastTime {
+            guard t > last else { return }
+            if runs.isEmpty || t - last > Self.gapFactor * Swift.max(interval, lastInterval) {
+                closeOpen()
+                runs.append([])
+                spanOpen = false
+                modeSpanOpen = false
+            }
+        } else {
+            runs.append([])
+        }
+        lastTime = t
+        lastInterval = interval
+        addPower(acPower, at: t)
+        addMode(mode, at: t)
+
+        let r = runs.count - 1
+        let index = Int((t / bucketSeconds).rounded(.down))
+        if runs[r].last?.index != index {
+            closeOpen()
+            runs[r].append(Bucket(index: index))
+            open = OpenBucket(index: index)
+        }
+        for s in values.indices { open?.values[s].append(values[s]) }
+        open?.dirty = true
+    }
+
+    private mutating func closeOpen() {
+        summarizeOpen()
+        open = nil
+    }
+
+    private mutating func summarizeOpen() {
+        guard let o = open, o.dirty, let r = runs.indices.last,
+              let i = runs[r].indices.last, runs[r][i].index == o.index else { return }
+        for (s, path) in Self.series.enumerated() { runs[r][i][keyPath: path] = Summary(o.values[s]) }
+        open?.dirty = false
+    }
+
+    /// Drops buckets that end before `time` and cuts power and mode spans off at `time`.
     mutating func trim(before time: TimeInterval) {
         let first = Int((time / bucketSeconds).rounded(.down))
         while let run = runs.first, run[run.count - 1].index < first { runs.removeFirst() }
         if let k = runs.first?.firstIndex(where: { $0.index >= first }), k > 0 { runs[0].removeFirst(k) }
+        if runs.isEmpty { open = nil }
+        if let k = powerSpans.firstIndex(where: { $0.end >= time }) {
+            powerSpans.removeFirst(k)
+            powerSpans[0].start = Swift.max(powerSpans[0].start, time)
+        } else {
+            powerSpans = []
+            spanOpen = false
+        }
         if let k = modeSpans.firstIndex(where: { $0.end >= time }) {
             modeSpans.removeFirst(k)
             modeSpans[0].start = Swift.max(modeSpans[0].start, time)
@@ -180,23 +348,23 @@ struct BatteryBuckets {
         }
     }
 
-    /// Smallest and largest value of one series across all buckets, for scaling the y axis.
-    func extent(_ series: KeyPath<Bucket, MinMax>) -> MinMax {
+    /// Smallest and largest value one series draws in `style`, for scaling the y axis.
+    func extent(_ series: KeyPath<Bucket, Summary>, style: ChartStyle) -> MinMax {
         var m = MinMax()
         for run in runs {
             for bucket in run {
-                let v = bucket[keyPath: series]
-                m.add(v.min)
-                m.add(v.max)
+                let s = bucket[keyPath: series]
+                if let v = style.line(s) { m.add(v) }
+                for band in style.bands(s) { m.add(band.low); m.add(band.high) }
             }
         }
         return m
     }
 
-    /// Reduces one series to at most one min/max column per pixel for a chart `width` px wide
-    /// showing `windowStart ..< windowStart + range`. One array per run, oldest first;
-    /// runs and buckets without values for this series are left out.
-    func columns(_ series: KeyPath<Bucket, MinMax>, width: Int,
+    /// Places one series' buckets on the pixel columns of a chart `width` px wide showing
+    /// `windowStart ..< windowStart + range`. One array per run, oldest first; runs and buckets
+    /// without values for this series are left out.
+    func columns(_ series: KeyPath<Bucket, Summary>, width: Int,
                  windowStart: TimeInterval, range: TimeInterval) -> [[Column]] {
         guard width > 0, range > 0 else { return [] }
         let scale = Double(width) / range
@@ -204,18 +372,12 @@ struct BatteryBuckets {
         for run in runs {
             var cols: [Column] = []
             for bucket in run {
-                let v = bucket[keyPath: series]
-                guard !v.isEmpty else { continue }
-                let mid = (Double(bucket.index) + 0.5) * bucketSeconds
-                let px = ((mid - windowStart) * scale).rounded(.down)
-                guard px >= 0 else { continue }
-                // The newest bucket's midpoint can sit just past the right edge.
-                let x = Int(Swift.min(px, Double(width - 1)))
-                if let last = cols.last, last.x == x {
-                    cols[cols.count - 1] = Column(x: x, min: Swift.min(last.min, v.min), max: Swift.max(last.max, v.max))
-                } else {
-                    cols.append(Column(x: x, min: v.min, max: v.max))
-                }
+                let s = bucket[keyPath: series]
+                guard !s.isEmpty else { continue }
+                let x = ((Double(bucket.index) + 0.5) * bucketSeconds - windowStart) * scale
+                guard x > -1 else { continue }
+                // The newest bucket's center can sit up to half a pixel past the right edge.
+                cols.append(Column(x: Swift.min(x, Double(width) - 0.5), summary: s))
             }
             if !cols.isEmpty { result.append(cols) }
         }
@@ -224,7 +386,7 @@ struct BatteryBuckets {
 }
 
 /// Chart data for the selected range: history loaded from disk off the main thread, then kept
-/// current from the recorder's live ticks.
+/// current from the recorder's live ticks. Nothing loads until the view reports its chart width.
 @MainActor
 final class BatteryHistory: ObservableObject {
 
@@ -234,7 +396,7 @@ final class BatteryHistory: ObservableObject {
     @Published private(set) var buckets: BatteryBuckets
     /// Right edge of the charts: the newest recorded tick, or the load time.
     @Published private(set) var now: Date
-    @Published private(set) var isLoading = false
+    @Published private(set) var isLoading = true
 
     var windowStart: TimeInterval { now.timeIntervalSince1970 - range.seconds }
 
@@ -243,34 +405,53 @@ final class BatteryHistory: ObservableObject {
     private var pending: [RecordedSample] = []
     private var loadID = 0
     private var subscription: AnyCancellable?
+    /// Chart width in pixel columns, one bucket each. 0 until the view is laid out.
+    private var columnCount = 0
+    private var resizeTask: Task<Void, Never>?
 
     init(recorder: BatteryRecorder, range: BatteryRange) {
         self.recorder = recorder
         self.range = range
-        buckets = BatteryBuckets(range: range.seconds)
+        buckets = BatteryBuckets(range: range.seconds, columns: 1)
         now = Date()
         subscription = recorder.$lastRecorded
             .compactMap { $0 }
             .sink { [weak self] in self?.receive($0) }
-        reload()
     }
 
-    func columns(_ series: KeyPath<BatteryBuckets.Bucket, MinMax>, width: Int) -> [[BatteryBuckets.Column]] {
+    func columns(_ series: KeyPath<BatteryBuckets.Bucket, Summary>, width: Int) -> [[BatteryBuckets.Column]] {
         buckets.columns(series, width: width, windowStart: windowStart, range: range.seconds)
+    }
+
+    /// Sets the chart width in pixels. The first width loads right away; later ones (window
+    /// resizing) once the width has settled. Until then the old buckets are stretched to fit.
+    func resize(columns: Int) {
+        guard columns > 0, columns != columnCount else { return }
+        let first = columnCount == 0
+        columnCount = columns
+        resizeTask?.cancel()
+        if first { reload(); return }
+        resizeTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(250))
+            guard !Task.isCancelled else { return }
+            self?.reload()
+        }
     }
 
     /// Reloads the selected range from disk. Only the flush and the final swap run on the main thread.
     func reload() {
+        guard columnCount > 0 else { return }
         loadID += 1
         let id = loadID
         let seconds = range.seconds
+        let columns = columnCount
         let directory = recorder.store.directory
         recorder.flush()
         let end = Date()
         isLoading = true
         pending = []
         Task.detached(priority: .userInitiated) { [weak self] in
-            var loaded = BatteryBuckets(range: seconds)
+            var loaded = BatteryBuckets(range: seconds, columns: columns)
             for segment in BatteryStore.read(from: end - seconds, to: end, directory: directory) {
                 loaded.add(segment)
             }
@@ -279,7 +460,7 @@ final class BatteryHistory: ObservableObject {
     }
 
     private func finishLoad(id: Int, buckets loaded: BatteryBuckets, end: Date) {
-        guard id == loadID else { return }  // superseded by a newer range
+        guard id == loadID else { return }  // superseded by a newer range or width
         buckets = loaded
         now = end
         isLoading = false

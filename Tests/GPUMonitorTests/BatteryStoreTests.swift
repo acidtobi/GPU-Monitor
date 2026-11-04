@@ -18,10 +18,10 @@ final class BatteryStoreTests: XCTestCase {
 
     // MARK: - Helpers
 
-    func sample(_ t: Double, pct: Double = 50, sys: Double? = 12.34, bat: Double? = -5.67,
+    func sample(_ t: Double, pct: Double = 50, sys: Double? = 12.34, bat: Double? = -5.67, ac: Bool? = false,
                 mode: PowerMode? = nil) -> BatterySample {
         BatterySample(timestamp: Date(timeIntervalSince1970: t), chargePct: pct, systemPowerW: sys, batteryPowerW: bat,
-                      powerMode: mode)
+                      acPower: ac, powerMode: mode)
     }
 
     func makeStore() -> BatteryStore { BatteryStore(directory: dir, flushInterval: 0) }
@@ -65,12 +65,97 @@ final class BatteryStoreTests: XCTestCase {
         XCTAssertEqual(BatteryStore.encodePct(150), 10_000)
         XCTAssertEqual(BatteryStore.encodePct(.nan), 0)
         XCTAssertLessThan(BatteryStore.encodePct(100), BatteryStore.segmentMarker, "a sample never looks like a segment header")
+        XCTAssertNotEqual(BatteryStore.encodeCharge(100, acPower: true), BatteryStore.segmentMarker, "not with AC bits either")
+        XCTAssertNotEqual(BatteryStore.encodeCharge(100, acPower: false), BatteryStore.segmentMarker)
+        XCTAssertGreaterThan(BatteryStore.pctMask, BatteryStore.encodePct(100), "AC bits don't overlap the charge")
+        for ac in [true, false, nil] as [Bool?] {
+            let word = BatteryStore.encodeCharge(87.65, acPower: ac)
+            XCTAssertEqual(BatteryStore.decodeACPower(word), ac)
+            XCTAssertEqual(word & BatteryStore.pctMask, 8_765)
+        }
         XCTAssertEqual(BatteryStore.encodePower(nil), BatteryStore.missingPower)
         XCTAssertEqual(BatteryStore.encodePower(.infinity), BatteryStore.missingPower)
         XCTAssertEqual(BatteryStore.encodePower(-1e9), BatteryStore.missingPower + 1)
         XCTAssertEqual(BatteryStore.encodePower(1e9), Int16.max)
         XCTAssertEqual(BatteryStore.encodePower(-0.004), 0)
         XCTAssertTrue(BatteryStore.decodePower(BatteryStore.missingPower).isNaN)
+    }
+
+    func testACPowerRoundTrip() throws {
+        let store = makeStore()
+        for (i, ac) in ([true, false, nil, true] as [Bool?]).enumerated() {
+            try store.append(sample(day0 + Double(i), pct: 100, ac: ac), interval: 1)
+        }
+        try store.close()
+
+        let g = try XCTUnwrap(read(day0, day0 + 10).first)
+        XCTAssertEqual(g.acPower, [true, false, nil, true])
+        XCTAssertEqual(g.chargePct, [100, 100, 100, 100], "AC bits don't leak into the charge")
+        XCTAssertEqual(read(day0 + 1, day0 + 2).first?.acPower, [false, nil], "trimmed with the other series")
+    }
+
+    func testVersion1FileIsReadAndUpgraded() throws {
+        // A v1 file: header, one segment of two samples at 42 %, no AC bits.
+        var data = Data(BatteryStore.magic) + [1, 0, 0, 0]
+        data += [0xFF, 0xFF, 0x01, 0x00] + withUnsafeBytes(of: UInt32(day0 + 10).littleEndian, Array.init)
+        for _ in 0..<2 { data += [0x68, 0x10, 0x00, 0x00, 0x00, 0x00] }  // 4200, 0 W, 0 W
+        try data.write(to: file(day: 20_000))
+
+        let v1 = read(day0, day0 + 100)
+        XCTAssertEqual(v1.map(\.count), [2])
+        XCTAssertEqual(v1[0].chargePct, [42, 42])
+        XCTAssertEqual(v1[0].acPower, [nil, nil], "v1 has no AC state")
+
+        let store = makeStore()
+        try store.append(sample(day0 + 20, ac: true), interval: 1)
+        try store.close()
+
+        let bytes = try Data(contentsOf: file(day: 20_000))
+        XCTAssertEqual(bytes[BatteryStore.magic.count], BatteryStore.version, "header upgraded in place")
+        let segs = read(day0, day0 + 100)
+        XCTAssertEqual(segs.map(\.count), [2, 1], "old samples kept")
+        XCTAssertEqual(segs[1].acPower, [true])
+    }
+
+    func testPowerModeRecords() throws {
+        let store = makeStore()
+        let modes: [PowerMode?] = [.low, .low, .high, nil, .automatic, .automatic]
+        for (i, m) in modes.enumerated() { try store.append(sample(day0 + Double(i), ac: true, mode: m), interval: 1) }
+        try store.breakSegment()
+        try store.append(sample(day0 + 100, mode: .automatic), interval: 1)
+        try store.close()
+
+        let segs = read(day0, day0 + 1000)
+        XCTAssertEqual(segs.map(\.powerMode), [modes, [.automatic]], "modes carry over until they change")
+        XCTAssertEqual(segs[0].acPower, Array(repeating: true, count: 6), "AC bits unaffected")
+        XCTAssertEqual(read(day0 + 2, day0 + 3).first?.powerMode, [.high, nil], "trimmed with the other series")
+        let size = try FileManager.default.attributesOfItem(atPath: file(day: 20_000).path)[.size] as? Int
+        XCTAssertEqual(size, BatteryStore.fileHeaderSize + 2 * BatteryStore.segmentHeaderSize
+                       + 7 * BatteryStore.sampleSize + 5 * BatteryStore.modeRecordSize,
+                       "a record per change (incl. to unknown) and per segment start, none per sample")
+    }
+
+    func testVersion2FileIsReadAndUpgraded() throws {
+        // A v2 file: one segment of two samples at 42 % on AC, no mode records.
+        var data = Data(BatteryStore.magic) + [2, 0, 0, 0]
+        data += [0xFF, 0xFF, 0x01, 0x00] + withUnsafeBytes(of: UInt32(day0 + 10).littleEndian, Array.init)
+        for _ in 0..<2 { data += [0x68, 0xD0, 0x00, 0x00, 0x00, 0x00] }  // 4200 | AC known | on AC
+        try data.write(to: file(day: 20_000))
+
+        let v2 = read(day0, day0 + 100)
+        XCTAssertEqual(v2.map(\.count), [2])
+        XCTAssertEqual(v2[0].acPower, [true, true])
+        XCTAssertEqual(v2[0].powerMode, [nil, nil], "v2 has no mode records")
+
+        let store = makeStore()
+        try store.append(sample(day0 + 20, mode: .low), interval: 1)
+        try store.close()
+
+        let bytes = try Data(contentsOf: file(day: 20_000))
+        XCTAssertEqual(bytes[BatteryStore.magic.count], 3, "header upgraded in place")
+        let segs = read(day0, day0 + 100)
+        XCTAssertEqual(segs.map(\.count), [2, 1], "old samples kept")
+        XCTAssertEqual(segs.map(\.powerMode), [[nil, nil], [.low]])
     }
 
     func testAppendReturnsStoredTimestamp() throws {
@@ -134,52 +219,6 @@ final class BatteryStoreTests: XCTestCase {
         XCTAssertEqual(read(day0, day0 + 10).map(\.count), [3])
     }
 
-    // MARK: - Energy Mode
-
-    func testPowerModeRecords() throws {
-        let store = makeStore()
-        let modes: [PowerMode?] = [.low, .low, .high, nil, .automatic, .automatic]
-        for (i, m) in modes.enumerated() { try store.append(sample(day0 + Double(i), mode: m), interval: 1) }
-        try store.breakSegment()
-        try store.append(sample(day0 + 100, mode: .automatic), interval: 1)
-        try store.close()
-
-        let segs = read(day0, day0 + 1000)
-        XCTAssertEqual(segs.map(\.powerMode), [modes, [.automatic]], "modes carry over until they change")
-        let size = try FileManager.default.attributesOfItem(atPath: file(day: 20_000).path)[.size] as? Int
-        XCTAssertEqual(size, BatteryStore.fileHeaderSize + 2 * BatteryStore.segmentHeaderSize
-                       + 7 * BatteryStore.sampleSize + 5 * BatteryStore.modeRecordSize,
-                       "a record per change (incl. to unknown) and per segment start, none per sample")
-    }
-
-    func testVersion1FileIsReadAndUpgraded() throws {
-        // A v1 file: one segment of two samples, no mode records.
-        var v1 = Data(BatteryStore.magic) + [1, 0, 0, 0]
-        v1 += [0xFF, 0xFF, 0x01, 0x00] + withUnsafeBytes(of: UInt32(day0 + 10).littleEndian) { Data($0) }
-        v1 += [0x88, 0x13, 0x00, 0x00, 0x00, 0x00] + [0x88, 0x13, 0x00, 0x00, 0x00, 0x00]
-        try v1.write(to: file(day: 20_000))
-        XCTAssertEqual(read(day0, day0 + 100).map(\.powerMode), [[nil, nil]])
-
-        let store = makeStore()
-        try store.append(sample(day0 + 20, mode: .high), interval: 1)
-        try store.close()
-
-        let data = try Data(contentsOf: file(day: 20_000))
-        XCTAssertEqual(data[BatteryStore.magic.count], BatteryStore.version, "header bumped on open")
-        XCTAssertEqual(read(day0, day0 + 100).map(\.powerMode), [[nil, nil], [.high]])
-    }
-
-    func testTornModeRecord() throws {
-        var data = Data(BatteryStore.magic) + [BatteryStore.version, 0, 0, 0]
-        data += [0xFF, 0xFF, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00]
-        data += [0x88, 0x13, 0x00, 0x00, 0x00, 0x00]
-        let complete = data.count
-        data += [0xFE, 0xFF, 0x02]  // 3 of 4 bytes
-        let parsed = BatteryStore.parse(data)
-        XCTAssertEqual(parsed.segments.map(\.count), [1])
-        XCTAssertEqual(parsed.validEnd, complete)
-    }
-
     // MARK: - Recovery
 
     func testTornTrailingRecord() throws {
@@ -206,6 +245,17 @@ final class BatteryStoreTests: XCTestCase {
         XCTAssertTrue(parsed.headerOK)
         XCTAssertTrue(parsed.segments.isEmpty)
         XCTAssertEqual(parsed.validEnd, BatteryStore.fileHeaderSize)
+    }
+
+    func testTornModeRecord() throws {
+        var data = Data(BatteryStore.magic) + [BatteryStore.version, 0, 0, 0]
+        data += [0xFF, 0xFF, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00]
+        data += [0x88, 0x13, 0x00, 0x00, 0x00, 0x00]
+        let complete = data.count
+        data += [0xFE, 0xFF, 0x02]  // 3 of 4 mode record bytes
+        let parsed = BatteryStore.parse(data)
+        XCTAssertEqual(parsed.segments.map(\.count), [1])
+        XCTAssertEqual(parsed.validEnd, complete)
     }
 
     func testCorruptFileIsMovedAside() throws {

@@ -43,7 +43,9 @@ struct BatterySample: Equatable {
     let systemPowerW: Double?
     /// Battery power in watts: positive while charging, negative while discharging.
     let batteryPowerW: Double?
-    /// Energy Mode at the time. nil when unknown.
+    /// True while a power adapter is connected. nil when unknown (history recorded before v2).
+    let acPower: Bool?
+    /// Energy Mode at the time. nil when unknown (history recorded before v3).
     var powerMode: PowerMode? = nil
 }
 
@@ -112,6 +114,7 @@ final class BatterySampler {
                                   chargePct: chargePct,
                                   systemPowerW: systemPowerW,
                                   batteryPowerW: batteryPowerW,
+                                  acPower: status.externalConnected,
                                   powerMode: PowerMode.current()),
             status: status
         )
