@@ -157,7 +157,7 @@ struct Summary {
 /// (index = unix seconds / bucketSeconds), so as the window slides the columns scroll along
 /// unchanged: buckets are only added at the end and dropped at the start.
 ///
-/// The AC state is kept at full resolution instead, as spans of unchanged power source.
+/// The AC state and Energy Mode are kept at full resolution instead, as spans of unchanged value.
 struct BatteryBuckets {
     struct Bucket {
         let index: Int
@@ -180,16 +180,28 @@ struct BatteryBuckets {
         var end: TimeInterval
 
         var duration: TimeInterval { end - start }
+        var durationLabel: String { BatteryBuckets.durationLabel(duration) }
+    }
 
-        /// "45s", "12m", "5h 12m", "2d 3h".
-        var durationLabel: String {
-            let s = Int(duration.rounded())
-            if s < 60 { return "\(s)s" }
-            let m = s / 60
-            if m < 60 { return "\(m)m" }
-            if m < 1_440 { return "\(m / 60)h \(m % 60)m" }
-            return "\(m / 1_440)d \(m % 1_440 / 60)h"
-        }
+    /// A continuous stretch in one Energy Mode. Holds from its first sample until the next sample
+    /// in its run, so back-to-back spans meet without a gap.
+    struct ModeSpan: Equatable {
+        let mode: PowerMode
+        var start: TimeInterval
+        var end: TimeInterval
+
+        var duration: TimeInterval { end - start }
+        var durationLabel: String { BatteryBuckets.durationLabel(duration) }
+    }
+
+    /// "45s", "12m", "5h 12m", "2d 3h".
+    static func durationLabel(_ duration: TimeInterval) -> String {
+        let s = Int(duration.rounded())
+        if s < 60 { return "\(s)s" }
+        let m = s / 60
+        if m < 60 { return "\(m)m" }
+        if m < 1_440 { return "\(m / 60)h \(m % 60)m" }
+        return "\(m / 1_440)d \(m % 1_440 / 60)h"
     }
 
     /// Consecutive samples further apart than this many intervals are separated by a gap.
@@ -211,12 +223,16 @@ struct BatteryBuckets {
     private(set) var runs: [[Bucket]] = []
     /// Oldest first. Recording gaps and samples with unknown AC state end a span.
     private(set) var powerSpans: [PowerSpan] = []
+    /// Oldest first. Recording gaps and samples with unknown mode end a span.
+    private(set) var modeSpans: [ModeSpan] = []
     private(set) var lastTime: TimeInterval?
     private var lastInterval: TimeInterval = 0
     /// The last bucket of the last run.
     private var open: OpenBucket?
     /// Whether the last span is still being extended by new samples.
     private var spanOpen = false
+    /// Whether the last mode span is still being extended by new samples.
+    private var modeSpanOpen = false
 
     /// Buckets for a chart `columns` pixels wide showing `range` seconds.
     init(range: TimeInterval, columns: Int) {
@@ -225,8 +241,8 @@ struct BatteryBuckets {
 
     /// Adds one sample. Samples must arrive in time order; anything not newer than the last is ignored.
     mutating func add(time t: TimeInterval, interval: TimeInterval, charge: Float, system: Float, battery: Float,
-                      acPower: Bool? = nil) {
-        append(time: t, interval: interval, values: [charge, system, battery], acPower: acPower)
+                      acPower: Bool? = nil, mode: PowerMode? = nil) {
+        append(time: t, interval: interval, values: [charge, system, battery], acPower: acPower, mode: mode)
         summarizeOpen()
     }
 
@@ -238,12 +254,21 @@ struct BatteryBuckets {
         spanOpen = true
     }
 
+    private mutating func addMode(_ mode: PowerMode?, at t: TimeInterval) {
+        if modeSpanOpen { modeSpans[modeSpans.count - 1].end = t }
+        guard let mode else { modeSpanOpen = false; return }
+        if modeSpanOpen && modeSpans[modeSpans.count - 1].mode == mode { return }
+        modeSpans.append(ModeSpan(mode: mode, start: t, end: t))
+        modeSpanOpen = true
+    }
+
     mutating func add(_ segment: BatterySegment) {
         let start = segment.start.timeIntervalSince1970
         for i in 0..<segment.count {
             append(time: start + Double(i) * segment.interval, interval: segment.interval,
                    values: [segment.chargePct[i], segment.systemPowerW[i], segment.batteryPowerW[i]],
-                   acPower: i < segment.acPower.count ? segment.acPower[i] : nil)
+                   acPower: i < segment.acPower.count ? segment.acPower[i] : nil,
+                   mode: i < segment.powerMode.count ? segment.powerMode[i] : nil)
         }
         summarizeOpen()
     }
@@ -254,19 +279,21 @@ struct BatteryBuckets {
             charge: Float(s.chargePct),
             system: Float(s.systemPowerW ?? .nan),
             battery: Float(s.batteryPowerW ?? .nan),
-            acPower: s.acPower)
+            acPower: s.acPower,
+            mode: s.powerMode)
     }
 
     /// Adds a sample to its bucket. The newest bucket is summed up when it's complete or by
     /// summarizeOpen(), so a bulk load sorts each bucket once.
     private mutating func append(time t: TimeInterval, interval: TimeInterval, values: [Float],
-                                 acPower: Bool?) {
+                                 acPower: Bool?, mode: PowerMode?) {
         if let last = lastTime {
             guard t > last else { return }
             if runs.isEmpty || t - last > Self.gapFactor * Swift.max(interval, lastInterval) {
                 closeOpen()
                 runs.append([])
                 spanOpen = false
+                modeSpanOpen = false
             }
         } else {
             runs.append([])
@@ -274,6 +301,7 @@ struct BatteryBuckets {
         lastTime = t
         lastInterval = interval
         addPower(acPower, at: t)
+        addMode(mode, at: t)
 
         let r = runs.count - 1
         let index = Int((t / bucketSeconds).rounded(.down))
@@ -298,7 +326,7 @@ struct BatteryBuckets {
         open?.dirty = false
     }
 
-    /// Drops buckets that end before `time` and cuts power spans off at `time`.
+    /// Drops buckets that end before `time` and cuts power and mode spans off at `time`.
     mutating func trim(before time: TimeInterval) {
         let first = Int((time / bucketSeconds).rounded(.down))
         while let run = runs.first, run[run.count - 1].index < first { runs.removeFirst() }
@@ -310,6 +338,13 @@ struct BatteryBuckets {
         } else {
             powerSpans = []
             spanOpen = false
+        }
+        if let k = modeSpans.firstIndex(where: { $0.end >= time }) {
+            modeSpans.removeFirst(k)
+            modeSpans[0].start = Swift.max(modeSpans[0].start, time)
+        } else {
+            modeSpans = []
+            modeSpanOpen = false
         }
     }
 

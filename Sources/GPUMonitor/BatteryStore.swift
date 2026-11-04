@@ -1,7 +1,7 @@
 import Foundation
 
 /// One unbroken run of recorded samples. Sample i was recorded at start + i × interval.
-/// Each series is its own array; missing power values are NaN, unknown AC state is nil.
+/// Each series is its own array; missing power values are NaN, unknown AC state and mode nil.
 struct BatterySegment {
     var start: Date
     var interval: TimeInterval
@@ -10,6 +10,8 @@ struct BatterySegment {
     var batteryPowerW: [Float] = []
     /// May be shorter than `count` for segments built in code; missing entries are unknown.
     var acPower: [Bool?] = []
+    /// May be shorter than `count` for segments built in code; missing entries are unknown.
+    var powerMode: [PowerMode?] = []
 
     var count: Int { chargePct.count }
 
@@ -22,24 +24,34 @@ struct BatterySegment {
 ///
 ///     file header     8 B   "BATT", u8 version, 3 B reserved
 ///     segment header  8 B   u16 0xFFFF, u16 interval seconds, u32 start unix seconds
+///     mode record     4 B   u16 0xFFFE, u8 Energy Mode (PowerMode raw value, 0xFF unknown), u8 reserved
 ///     sample          6 B   u16 charge word, i16 systemPower in 10 mW, i16 batteryPower in 10 mW
 ///     charge word           bits 0–13 chargePct × 100 (0…10000), bit 14 on AC power, bit 15 AC state known
 ///
 /// Sample timestamps are implicit (segment start + n × interval), so a sample costs 6 bytes:
-/// ~518 KB per day at 1 s. 0xFFFF can never be a valid charge word, which is what tells a
-/// segment header apart from a sample. Int16.min marks a missing power value.
-/// Version 1 had no AC bits; its files read as AC unknown and are upgraded in place when appended to.
+/// ~518 KB per day at 1 s. 0xFFFF and 0xFFFE can never be valid charge words (their charge bits
+/// exceed 10000), which is what tells headers and mode records apart from samples. Int16.min marks
+/// a missing power value.
+///
+/// A mode record applies to the samples after it, up to the next mode record or segment header.
+/// The writer emits one at the start of each segment and whenever the mode changes.
+///
+/// Version 1 had no AC bits, version 2 no mode records. Their files read as AC / mode unknown and
+/// are upgraded in place when appended to.
 ///
 /// A new segment starts on launch, interval change, gaps (sleep, missed ticks) and day rollover.
 /// Writing is not thread-safe. `read` only touches flushed bytes and is safe from any thread.
 final class BatteryStore {
 
     static let magic = Array("BATT".utf8)
-    static let version: UInt8 = 2
+    static let version: UInt8 = 3
     static let fileHeaderSize = 8
     static let segmentHeaderSize = 8
+    static let modeRecordSize = 4
     static let sampleSize = 6
     static let segmentMarker: UInt16 = 0xFFFF
+    static let modeMarker: UInt16 = 0xFFFE
+    static let unknownMode: UInt8 = 0xFF
     static let acKnownFlag: UInt16 = 0x8000
     static let acPowerFlag: UInt16 = 0x4000
     static let pctMask: UInt16 = 0x3FFF
@@ -59,6 +71,8 @@ final class BatteryStore {
     private var handle: FileHandle?
     private var currentDay: Int?
     private var segment: (start: Int, interval: Int, count: Int)?
+    /// The mode the samples written to the current segment so far are under.
+    private var segmentMode: PowerMode?
     private var lastTimestamp: Int?
     private var buffer = Data()
     private var lastFlush = Date()
@@ -109,6 +123,7 @@ final class BatteryStore {
         buffer.appendLE(UInt16(interval))
         buffer.appendLE(UInt32(clamping: start))
         segment = (start, interval, 0)
+        segmentMode = nil
         writeSample(sample)
         segment?.count = 1
         lastTimestamp = start
@@ -142,6 +157,12 @@ final class BatteryStore {
     }
 
     private func writeSample(_ s: BatterySample) {
+        if s.powerMode != segmentMode {
+            buffer.appendLE(Self.modeMarker)
+            buffer.append(s.powerMode?.rawValue ?? Self.unknownMode)
+            buffer.append(0)
+            segmentMode = s.powerMode
+        }
         buffer.appendLE(Self.encodeCharge(s.chargePct, acPower: s.acPower))
         buffer.appendLE(Self.encodePower(s.systemPowerW))
         buffer.appendLE(Self.encodePower(s.batteryPowerW))
@@ -216,7 +237,8 @@ final class BatteryStore {
                     chargePct: Array(seg.chargePct[first...last]),
                     systemPowerW: Array(seg.systemPowerW[first...last]),
                     batteryPowerW: Array(seg.batteryPowerW[first...last]),
-                    acPower: Array(seg.acPower[first...last])
+                    acPower: Array(seg.acPower[first...last]),
+                    powerMode: Array(seg.powerMode[first...last])
                 ))
             }
         }
@@ -245,6 +267,7 @@ final class BatteryStore {
             func u32(_ o: Int) -> UInt32 { UInt32(littleEndian: raw.loadUnaligned(fromByteOffset: o, as: UInt32.self)) }
 
             var o = fileHeaderSize
+            var mode: PowerMode?
             while o + 2 <= raw.count {
                 let first = u16(o)
                 if first == segmentMarker {
@@ -253,7 +276,12 @@ final class BatteryStore {
                     guard interval > 0 else { break }
                     out.segments.append(BatterySegment(start: Date(timeIntervalSince1970: Double(u32(o + 4))),
                                                        interval: Double(interval)))
+                    mode = nil
                     o += segmentHeaderSize
+                } else if first == modeMarker {
+                    guard !out.segments.isEmpty, o + modeRecordSize <= raw.count else { break }
+                    mode = PowerMode(rawValue: raw[o + 2])
+                    o += modeRecordSize
                 } else {
                     let pct = first & pctMask
                     guard pct <= 10_000, !out.segments.isEmpty, o + sampleSize <= raw.count else { break }
@@ -262,6 +290,7 @@ final class BatteryStore {
                     out.segments[last].systemPowerW.append(decodePower(i16(o + 2)))
                     out.segments[last].batteryPowerW.append(decodePower(i16(o + 4)))
                     out.segments[last].acPower.append(decodeACPower(first))
+                    out.segments[last].powerMode.append(mode)
                     o += sampleSize
                 }
                 out.validEnd = o

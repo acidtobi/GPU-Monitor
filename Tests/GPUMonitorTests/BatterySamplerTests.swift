@@ -18,6 +18,21 @@ final class BatterySamplerTests: XCTestCase {
         XCTAssertNil(smc.float("ZZZZ"), "missing key")
     }
 
+    func testPowerModeDecoding() {
+        XCTAssertEqual(PowerMode(settings: ["LowPowerMode": 0]), .automatic)
+        XCTAssertEqual(PowerMode(settings: ["LowPowerMode": 1]), .low)
+        XCTAssertEqual(PowerMode(settings: ["LowPowerMode": 2, "HighPowerMode": 0]), .high)
+        XCTAssertEqual(PowerMode(settings: ["LowPowerMode": 0, "HighPowerMode": 1]), .high, "macOS 12 key")
+        XCTAssertNil(PowerMode(settings: ["LowPowerMode": 7]))
+        XCTAssertNil(PowerMode(settings: [:]))
+    }
+
+    /// The live mode must agree with Foundation's Low Power flag.
+    func testLivePowerMode() throws {
+        guard let mode = PowerMode.current() else { throw XCTSkip("powerd publishes no Energy Mode") }
+        XCTAssertEqual(mode == .low, ProcessInfo.processInfo.isLowPowerModeEnabled)
+    }
+
     func testLiveSampleUsesRealLevel() throws {
         guard let reading = BatterySampler().sample() else { throw XCTSkip("no battery") }
         XCTAssertTrue((0...100).contains(reading.sample.chargePct))

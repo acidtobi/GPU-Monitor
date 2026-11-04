@@ -6,8 +6,10 @@ final class BatteryBucketsTests: XCTestCase {
     let t0 = Double(20_000 * 86_400)
 
     func add(_ b: inout BatteryBuckets, _ t: Double, interval: Double = 1,
-             charge: Float = 50, system: Float = 10, battery: Float = -10, ac: Bool? = nil) {
-        b.add(time: t0 + t, interval: interval, charge: charge, system: system, battery: battery, acPower: ac)
+             charge: Float = 50, system: Float = 10, battery: Float = -10, ac: Bool? = nil,
+             mode: PowerMode? = nil) {
+        b.add(time: t0 + t, interval: interval, charge: charge, system: system, battery: battery, acPower: ac,
+              mode: mode)
     }
 
     /// Field by field, with NaN equal to NaN.
@@ -213,6 +215,50 @@ final class BatteryBucketsTests: XCTestCase {
         var b = BatteryBuckets(range: 300, columns: 300)
         b.add(seg)
         XCTAssertEqual(b.powerSpans, [BatteryBuckets.PowerSpan(ac: true, start: t0, end: t0 + 10)],
+                       "a missing entry is unknown and ends the span")
+    }
+
+    func testModeSpans() {
+        var b = BatteryBuckets(range: 3_600, columns: 600)
+        for i in 0..<10 { add(&b, Double(i), mode: nil) }                    // 0–9 s: unknown (pre-v3 history)
+        for i in 10..<20 { add(&b, Double(i), ac: i < 15, mode: .low) }       // 10–19 s: Low Power, AC flips
+        for i in 20..<30 { add(&b, Double(i), mode: .high) }                 // 20–29 s: High Power
+        for i in 100..<105 { add(&b, Double(i), mode: .high) }               // after a gap: a new span
+        add(&b, 105, mode: nil)                                               // unknown ends it
+
+        typealias S = BatteryBuckets.ModeSpan
+        XCTAssertEqual(b.modeSpans, [
+            S(mode: .low, start: t0 + 10, end: t0 + 20),   // held until the next mode; AC changes don't split it
+            S(mode: .high, start: t0 + 20, end: t0 + 29),  // ends at the last sample before the gap
+            S(mode: .high, start: t0 + 100, end: t0 + 105),
+        ])
+        add(&b, 106, mode: .automatic)
+        XCTAssertEqual(b.modeSpans.last, S(mode: .automatic, start: t0 + 106, end: t0 + 106),
+                       "starts fresh after unknown")
+    }
+
+    func testModeSpansTrim() {
+        var b = BatteryBuckets(range: 3_600, columns: 600)
+        for i in 0..<10 { add(&b, Double(i), mode: .automatic) }
+        for i in 10..<20 { add(&b, Double(i), mode: .low) }
+        b.trim(before: t0 + 15)
+        XCTAssertEqual(b.modeSpans, [BatteryBuckets.ModeSpan(mode: .low, start: t0 + 15, end: t0 + 19)],
+                       "older spans dropped, the straddling one cut at the window edge")
+        add(&b, 20, mode: .low)
+        XCTAssertEqual(b.modeSpans.last?.end, t0 + 20, "still extended")
+        b.trim(before: t0 + 1_000)
+        XCTAssertTrue(b.modeSpans.isEmpty)
+        add(&b, 1_001, mode: .high)
+        XCTAssertEqual(b.modeSpans.count, 1)
+    }
+
+    func testModeSpanFromSegment() {
+        let seg = BatterySegment(start: Date(timeIntervalSince1970: t0), interval: 5,
+                                 chargePct: [1, 2, 3], systemPowerW: [4, 5, 6], batteryPowerW: [-1, -2, -3],
+                                 powerMode: [.low, .low])
+        var b = BatteryBuckets(range: 300, columns: 300)
+        b.add(seg)
+        XCTAssertEqual(b.modeSpans, [BatteryBuckets.ModeSpan(mode: .low, start: t0, end: t0 + 10)],
                        "a missing entry is unknown and ends the span")
     }
 

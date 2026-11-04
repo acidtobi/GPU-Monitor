@@ -18,9 +18,10 @@ final class BatteryStoreTests: XCTestCase {
 
     // MARK: - Helpers
 
-    func sample(_ t: Double, pct: Double = 50, sys: Double? = 12.34, bat: Double? = -5.67, ac: Bool? = false) -> BatterySample {
+    func sample(_ t: Double, pct: Double = 50, sys: Double? = 12.34, bat: Double? = -5.67, ac: Bool? = false,
+                mode: PowerMode? = nil) -> BatterySample {
         BatterySample(timestamp: Date(timeIntervalSince1970: t), chargePct: pct, systemPowerW: sys, batteryPowerW: bat,
-                      acPower: ac)
+                      acPower: ac, powerMode: mode)
     }
 
     func makeStore() -> BatteryStore { BatteryStore(directory: dir, flushInterval: 0) }
@@ -116,6 +117,47 @@ final class BatteryStoreTests: XCTestCase {
         XCTAssertEqual(segs[1].acPower, [true])
     }
 
+    func testPowerModeRecords() throws {
+        let store = makeStore()
+        let modes: [PowerMode?] = [.low, .low, .high, nil, .automatic, .automatic]
+        for (i, m) in modes.enumerated() { try store.append(sample(day0 + Double(i), ac: true, mode: m), interval: 1) }
+        try store.breakSegment()
+        try store.append(sample(day0 + 100, mode: .automatic), interval: 1)
+        try store.close()
+
+        let segs = read(day0, day0 + 1000)
+        XCTAssertEqual(segs.map(\.powerMode), [modes, [.automatic]], "modes carry over until they change")
+        XCTAssertEqual(segs[0].acPower, Array(repeating: true, count: 6), "AC bits unaffected")
+        XCTAssertEqual(read(day0 + 2, day0 + 3).first?.powerMode, [.high, nil], "trimmed with the other series")
+        let size = try FileManager.default.attributesOfItem(atPath: file(day: 20_000).path)[.size] as? Int
+        XCTAssertEqual(size, BatteryStore.fileHeaderSize + 2 * BatteryStore.segmentHeaderSize
+                       + 7 * BatteryStore.sampleSize + 5 * BatteryStore.modeRecordSize,
+                       "a record per change (incl. to unknown) and per segment start, none per sample")
+    }
+
+    func testVersion2FileIsReadAndUpgraded() throws {
+        // A v2 file: one segment of two samples at 42 % on AC, no mode records.
+        var data = Data(BatteryStore.magic) + [2, 0, 0, 0]
+        data += [0xFF, 0xFF, 0x01, 0x00] + withUnsafeBytes(of: UInt32(day0 + 10).littleEndian, Array.init)
+        for _ in 0..<2 { data += [0x68, 0xD0, 0x00, 0x00, 0x00, 0x00] }  // 4200 | AC known | on AC
+        try data.write(to: file(day: 20_000))
+
+        let v2 = read(day0, day0 + 100)
+        XCTAssertEqual(v2.map(\.count), [2])
+        XCTAssertEqual(v2[0].acPower, [true, true])
+        XCTAssertEqual(v2[0].powerMode, [nil, nil], "v2 has no mode records")
+
+        let store = makeStore()
+        try store.append(sample(day0 + 20, mode: .low), interval: 1)
+        try store.close()
+
+        let bytes = try Data(contentsOf: file(day: 20_000))
+        XCTAssertEqual(bytes[BatteryStore.magic.count], 3, "header upgraded in place")
+        let segs = read(day0, day0 + 100)
+        XCTAssertEqual(segs.map(\.count), [2, 1], "old samples kept")
+        XCTAssertEqual(segs.map(\.powerMode), [[nil, nil], [.low]])
+    }
+
     func testAppendReturnsStoredTimestamp() throws {
         let store = makeStore()
         XCTAssertEqual(try store.append(sample(day0 + 10.3), interval: 1), Date(timeIntervalSince1970: day0 + 10))
@@ -203,6 +245,17 @@ final class BatteryStoreTests: XCTestCase {
         XCTAssertTrue(parsed.headerOK)
         XCTAssertTrue(parsed.segments.isEmpty)
         XCTAssertEqual(parsed.validEnd, BatteryStore.fileHeaderSize)
+    }
+
+    func testTornModeRecord() throws {
+        var data = Data(BatteryStore.magic) + [BatteryStore.version, 0, 0, 0]
+        data += [0xFF, 0xFF, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00]
+        data += [0x88, 0x13, 0x00, 0x00, 0x00, 0x00]
+        let complete = data.count
+        data += [0xFE, 0xFF, 0x02]  // 3 of 4 mode record bytes
+        let parsed = BatteryStore.parse(data)
+        XCTAssertEqual(parsed.segments.map(\.count), [1])
+        XCTAssertEqual(parsed.validEnd, complete)
     }
 
     func testCorruptFileIsMovedAside() throws {
