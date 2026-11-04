@@ -26,6 +26,7 @@ struct BatteryView: View {
 private struct BatteryCharts: View {
     @ObservedObject var recorder: BatteryRecorder
     @Binding var range: BatteryRange
+    @AppStorage("batteryChartStyle") private var style: ChartStyle = .averageBand
     @StateObject private var history: BatteryHistory
 
     init(recorder: BatteryRecorder, range: Binding<BatteryRange>) {
@@ -57,6 +58,7 @@ private struct BatteryCharts: View {
                         .foregroundStyle(.secondary)
                 }
             }
+            .onPreferenceChange(ChartWidthKey.self) { history.resize(columns: Int($0)) }
             .padding(.horizontal, 16)
             .padding(.bottom, 4)
             timeAxis
@@ -75,6 +77,20 @@ private struct BatteryCharts: View {
             .labelsHidden()
             .fixedSize()
             .help("Time range shown")
+
+            // An icon rather than the style's name: the header is full at the minimum width.
+            Menu {
+                Picker("Chart style", selection: $style) {
+                    ForEach(ChartStyle.allCases) { Text($0.label).tag($0) }
+                }
+                .pickerStyle(.inline)
+                .labelsHidden()
+            } label: {
+                Image(systemName: "chart.xyaxis.line")
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .help("Chart style: \(style.help)")
 
             Spacer()
 
@@ -133,26 +149,28 @@ private struct BatteryCharts: View {
             lower: 0, upper: 100,
             yLabels: ["100%", "50%", "0%"],
             positiveColor: Self.chargeColor, negativeColor: Self.chargeColor,
+            style: style,
             gridFractions: gridFractions,
             yAxisWidth: Self.yAxisWidth,
             columns: { history.columns(\.charge, width: $0) })
     }
 
     private var systemChart: some View {
-        let top = Self.niceCeiling(Double(history.buckets.extent(\.system).max))
+        let top = Self.niceCeiling(Double(history.buckets.extent(\.system, style: style).max))
         return BatteryChart(
             title: "System",
             value: recorder.latest?.sample.systemPowerW.map { String(format: "%.1f W", $0) },
             lower: 0, upper: top,
             yLabels: [Self.watts(top), Self.watts(top / 2), "0 W"],
             positiveColor: Self.systemColor, negativeColor: Self.systemColor,
+            style: style,
             gridFractions: gridFractions,
             yAxisWidth: Self.yAxisWidth,
             columns: { history.columns(\.system, width: $0) })
     }
 
     private var batteryChart: some View {
-        let e = history.buckets.extent(\.battery)
+        let e = history.buckets.extent(\.battery, style: style)
         let top = Self.niceCeiling(max(abs(Double(e.min)), abs(Double(e.max))))
         return BatteryChart(
             title: "Battery",
@@ -160,6 +178,7 @@ private struct BatteryCharts: View {
             lower: -top, upper: top,
             yLabels: ["+" + Self.watts(top), "0 W", "−" + Self.watts(top)],
             positiveColor: Self.chargingColor, negativeColor: Self.dischargingColor,
+            style: style,
             gridFractions: gridFractions,
             yAxisWidth: Self.yAxisWidth,
             columns: { history.columns(\.battery, width: $0) })
@@ -273,8 +292,15 @@ private struct PowerBar: View {
 
 // MARK: - Chart
 
-/// One time series drawn from per-pixel min/max columns: an area from zero to the extremes plus
-/// min and max lines. Values above zero use positiveColor, below zero negativeColor.
+/// Width of the chart canvases, which is also the number of pixel columns the history buckets.
+private struct ChartWidthKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
+}
+
+/// One time series drawn from per-pixel columns in the given style: a line (with an area down to
+/// zero when there's no band) and/or a shaded band. Values above zero use positiveColor, below
+/// zero negativeColor.
 private struct BatteryChart: View {
     let title: String
     let value: String?
@@ -284,6 +310,7 @@ private struct BatteryChart: View {
     let yLabels: [String]
     let positiveColor: Color
     let negativeColor: Color
+    let style: ChartStyle
     let gridFractions: [CGFloat]
     let yAxisWidth: CGFloat
     let columns: (Int) -> [[BatteryBuckets.Column]]
@@ -302,6 +329,7 @@ private struct BatteryChart: View {
             .frame(width: yAxisWidth, alignment: .trailing)
 
             Canvas { ctx, size in draw(ctx, size) }
+                .background(GeometryReader { Color.clear.preference(key: ChartWidthKey.self, value: $0.size.width) })
                 .overlay(alignment: .topLeading) { titleLabel }
                 .clipShape(RoundedRectangle(cornerRadius: 6))
                 .overlay(RoundedRectangle(cornerRadius: 6)
@@ -326,8 +354,8 @@ private struct BatteryChart: View {
     private func draw(_ ctx: GraphicsContext, _ size: CGSize) {
         let span = upper - lower
         guard span > 0, size.width > 0, size.height > 0 else { return }
-        func y(_ v: Double) -> CGFloat { size.height * CGFloat(1 - (v - lower) / span) }
-        let zero = y(min(max(0, lower), upper))
+        func y(_ v: Float) -> CGFloat { size.height * CGFloat(1 - (Double(v) - lower) / span) }
+        let zero = y(Float(min(max(0, lower), upper)))
 
         // Grid: horizontal quarters, vertical time steps, and the zero line when it's inside.
         var grid = Path()
@@ -347,24 +375,41 @@ private struct BatteryChart: View {
             ctx.stroke(axis, with: .color(.secondary.opacity(0.6)), lineWidth: 0.75)
         }
 
-        // Data: per run, an area from zero to the max (above) and to the min (below), plus both lines.
-        var area = Path(), lines = Path(), dots = Path()
+        // Data, per run: the bands, the line, and below a bandless line an area down to zero.
+        // A run of one column becomes short bars or a dot.
+        let opacities = bandOpacities
+        var bands = opacities.map { _ in Path() }
+        var area = Path(), line = Path(), dots = Path()
         for run in columns(Int(size.width)) {
-            let xs = run.map { CGFloat($0.x) + 0.5 }
-            if run.count == 1 {
-                let top = y(Double(run[0].max)), bottom = y(Double(run[0].min))
-                dots.addRect(CGRect(x: xs[0] - 1, y: top - 1, width: 2, height: max(2, bottom - top + 2)))
-                continue
+            let xs = run.map { CGFloat($0.x) }
+            let edges = run.map { style.bands($0.summary) }
+            for j in bands.indices {
+                // Half a point extra each way keeps a flat band visible.
+                let top = edges.map { y($0[j].high) - 0.5 }, bottom = edges.map { y($0[j].low) + 0.5 }
+                if run.count == 1 {
+                    bands[j].addRect(CGRect(x: xs[0] - 1, y: top[0], width: 2, height: bottom[0] - top[0]))
+                } else {
+                    bands[j].move(to: CGPoint(x: xs[0], y: top[0]))
+                    for i in run.indices.dropFirst() { bands[j].addLine(to: CGPoint(x: xs[i], y: top[i])) }
+                    for i in run.indices.reversed() { bands[j].addLine(to: CGPoint(x: xs[i], y: bottom[i])) }
+                    bands[j].closeSubpath()
+                }
             }
-            for edge in [run.map { y(max(0, Double($0.max))) }, run.map { y(min(0, Double($0.min))) }] {
-                area.move(to: CGPoint(x: xs[0], y: zero))
-                for (x, yy) in zip(xs, edge) { area.addLine(to: CGPoint(x: x, y: yy)) }
-                area.addLine(to: CGPoint(x: xs[xs.count - 1], y: zero))
-                area.closeSubpath()
-            }
-            for edge in [run.map { y(Double($0.max)) }, run.map { y(Double($0.min)) }] {
-                lines.move(to: CGPoint(x: xs[0], y: edge[0]))
-                for (x, yy) in zip(xs, edge).dropFirst() { lines.addLine(to: CGPoint(x: x, y: yy)) }
+            let values = run.compactMap { style.line($0.summary) }
+            if values.count == run.count {
+                let ys = values.map { y($0) }
+                if run.count == 1 {
+                    dots.addRect(CGRect(x: xs[0] - 1, y: ys[0] - 1, width: 2, height: 2))
+                } else {
+                    line.move(to: CGPoint(x: xs[0], y: ys[0]))
+                    for i in run.indices.dropFirst() { line.addLine(to: CGPoint(x: xs[i], y: ys[i])) }
+                    if bands.isEmpty {
+                        area.move(to: CGPoint(x: xs[0], y: zero))
+                        for i in run.indices { area.addLine(to: CGPoint(x: xs[i], y: ys[i])) }
+                        area.addLine(to: CGPoint(x: xs[xs.count - 1], y: zero))
+                        area.closeSubpath()
+                    }
+                }
             }
         }
 
@@ -375,8 +420,20 @@ private struct BatteryChart: View {
             var layer = ctx
             layer.clip(to: Path(rect))
             layer.fill(area, with: .color(color.opacity(0.25)))
-            layer.stroke(lines, with: .color(color), lineWidth: 1)
+            for (band, opacity) in zip(bands, opacities) { layer.fill(band, with: .color(color.opacity(opacity))) }
+            layer.stroke(line, with: .color(color), lineWidth: 1)
             layer.fill(dots, with: .color(color))
+        }
+    }
+
+    /// Fill opacity of each of style.bands, outermost first. A band standing alone gets more
+    /// weight than one behind a line; nested bands get darker inwards.
+    private var bandOpacities: [Double] {
+        switch style {
+        case .average:     []
+        case .minMax:      [0.6]
+        case .averageBand: [0.3]
+        case .quartiles:   [0.2, 0.45]
         }
     }
 }
