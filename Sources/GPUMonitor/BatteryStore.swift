@@ -1,13 +1,15 @@
 import Foundation
 
 /// One unbroken run of recorded samples. Sample i was recorded at start + i × interval.
-/// Each series is its own array; missing power values are NaN.
+/// Each series is its own array; missing power values are NaN, unknown AC state is nil.
 struct BatterySegment {
     var start: Date
     var interval: TimeInterval
     var chargePct: [Float] = []
     var systemPowerW: [Float] = []
     var batteryPowerW: [Float] = []
+    /// May be shorter than `count` for segments built in code; missing entries are unknown.
+    var acPower: [Bool?] = []
 
     var count: Int { chargePct.count }
 
@@ -20,22 +22,27 @@ struct BatterySegment {
 ///
 ///     file header     8 B   "BATT", u8 version, 3 B reserved
 ///     segment header  8 B   u16 0xFFFF, u16 interval seconds, u32 start unix seconds
-///     sample          6 B   u16 chargePct × 100 (0…10000), i16 systemPower in 10 mW, i16 batteryPower in 10 mW
+///     sample          6 B   u16 charge word, i16 systemPower in 10 mW, i16 batteryPower in 10 mW
+///     charge word           bits 0–13 chargePct × 100 (0…10000), bit 14 on AC power, bit 15 AC state known
 ///
 /// Sample timestamps are implicit (segment start + n × interval), so a sample costs 6 bytes:
-/// ~518 KB per day at 1 s. 0xFFFF can never be a valid charge value, which is what tells a
+/// ~518 KB per day at 1 s. 0xFFFF can never be a valid charge word, which is what tells a
 /// segment header apart from a sample. Int16.min marks a missing power value.
+/// Version 1 had no AC bits; its files read as AC unknown and are upgraded in place when appended to.
 ///
 /// A new segment starts on launch, interval change, gaps (sleep, missed ticks) and day rollover.
 /// Writing is not thread-safe. `read` only touches flushed bytes and is safe from any thread.
 final class BatteryStore {
 
     static let magic = Array("BATT".utf8)
-    static let version: UInt8 = 1
+    static let version: UInt8 = 2
     static let fileHeaderSize = 8
     static let segmentHeaderSize = 8
     static let sampleSize = 6
     static let segmentMarker: UInt16 = 0xFFFF
+    static let acKnownFlag: UInt16 = 0x8000
+    static let acPowerFlag: UInt16 = 0x4000
+    static let pctMask: UInt16 = 0x3FFF
     static let missingPower = Int16.min
 
     static var defaultDirectory: URL {
@@ -135,7 +142,7 @@ final class BatteryStore {
     }
 
     private func writeSample(_ s: BatterySample) {
-        buffer.appendLE(Self.encodePct(s.chargePct))
+        buffer.appendLE(Self.encodeCharge(s.chargePct, acPower: s.acPower))
         buffer.appendLE(Self.encodePower(s.systemPowerW))
         buffer.appendLE(Self.encodePower(s.batteryPowerW))
     }
@@ -153,6 +160,9 @@ final class BatteryStore {
             if parsed.headerOK {
                 let h = try FileHandle(forWritingTo: url)
                 try h.truncate(atOffset: UInt64(parsed.validEnd))
+                // Older versions are a subset of this one: bump the version byte, keep the data.
+                try h.seek(toOffset: UInt64(Self.magic.count))
+                try h.write(contentsOf: [Self.version])
                 try h.seekToEnd()
                 handle = h
             } else {
@@ -205,7 +215,8 @@ final class BatteryStore {
                     interval: seg.interval,
                     chargePct: Array(seg.chargePct[first...last]),
                     systemPowerW: Array(seg.systemPowerW[first...last]),
-                    batteryPowerW: Array(seg.batteryPowerW[first...last])
+                    batteryPowerW: Array(seg.batteryPowerW[first...last]),
+                    acPower: Array(seg.acPower[first...last])
                 ))
             }
         }
@@ -224,7 +235,7 @@ final class BatteryStore {
         var out = Parsed()
         guard data.count >= fileHeaderSize,
               Array(data.prefix(magic.count)) == magic,
-              data[data.startIndex + magic.count] == version else { return out }
+              (1...version).contains(data[data.startIndex + magic.count]) else { return out }
         out.headerOK = true
         out.validEnd = fileHeaderSize
 
@@ -244,11 +255,13 @@ final class BatteryStore {
                                                        interval: Double(interval)))
                     o += segmentHeaderSize
                 } else {
-                    guard first <= 10_000, !out.segments.isEmpty, o + sampleSize <= raw.count else { break }
+                    let pct = first & pctMask
+                    guard pct <= 10_000, !out.segments.isEmpty, o + sampleSize <= raw.count else { break }
                     let last = out.segments.count - 1
-                    out.segments[last].chargePct.append(Float(first) / 100)
+                    out.segments[last].chargePct.append(Float(pct) / 100)
                     out.segments[last].systemPowerW.append(decodePower(i16(o + 2)))
                     out.segments[last].batteryPowerW.append(decodePower(i16(o + 4)))
+                    out.segments[last].acPower.append(decodeACPower(first))
                     o += sampleSize
                 }
                 out.validEnd = o
@@ -263,6 +276,15 @@ final class BatteryStore {
     static func encodePct(_ pct: Double) -> UInt16 {
         guard pct.isFinite else { return 0 }
         return UInt16((min(100, max(0, pct)) * 100).rounded())
+    }
+
+    static func encodeCharge(_ pct: Double, acPower: Bool?) -> UInt16 {
+        guard let acPower else { return encodePct(pct) }
+        return encodePct(pct) | acKnownFlag | (acPower ? acPowerFlag : 0)
+    }
+
+    static func decodeACPower(_ word: UInt16) -> Bool? {
+        word & acKnownFlag == 0 ? nil : word & acPowerFlag != 0
     }
 
     /// Watts → 10 mW units, clamped to ±327.67 W. nil/NaN → missingPower.

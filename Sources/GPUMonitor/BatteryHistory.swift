@@ -62,6 +62,8 @@ struct MinMax: Equatable {
 /// Buckets are aligned to absolute time (index = unix seconds / bucketSeconds), so as the window
 /// slides, buckets are only added at the end and dropped at the start. Keeping min and max rather
 /// than averages keeps short spikes visible at every zoom level.
+///
+/// The AC state is kept at full resolution instead, as spans of unchanged power source.
 struct BatteryBuckets {
     struct Bucket: Equatable {
         let index: Int
@@ -77,6 +79,26 @@ struct BatteryBuckets {
         let max: Float
     }
 
+    /// A continuous stretch on AC or on battery power. Holds from its first sample until the next
+    /// sample in its run, so back-to-back spans meet without a gap.
+    struct PowerSpan: Equatable {
+        let ac: Bool
+        var start: TimeInterval
+        var end: TimeInterval
+
+        var duration: TimeInterval { end - start }
+
+        /// "45s", "12m", "5h 12m", "2d 3h".
+        var durationLabel: String {
+            let s = Int(duration.rounded())
+            if s < 60 { return "\(s)s" }
+            let m = s / 60
+            if m < 60 { return "\(m)m" }
+            if m < 1_440 { return "\(m / 60)h \(m % 60)m" }
+            return "\(m / 1_440)d \(m % 1_440 / 60)h"
+        }
+    }
+
     /// Buckets per displayed range. More than any chart is wide, so `columns` can merge them.
     static let bucketsPerRange = 2_000
     /// Consecutive samples further apart than this many intervals are separated by a gap.
@@ -85,23 +107,29 @@ struct BatteryBuckets {
     let bucketSeconds: TimeInterval
     /// Oldest first. Within a run samples are contiguous; draw each run as its own line.
     private(set) var runs: [[Bucket]] = []
+    /// Oldest first. Recording gaps and samples with unknown AC state end a span.
+    private(set) var powerSpans: [PowerSpan] = []
     private(set) var lastTime: TimeInterval?
     private var lastInterval: TimeInterval = 0
+    /// Whether the last span is still being extended by new samples.
+    private var spanOpen = false
 
     init(range: TimeInterval) {
         bucketSeconds = range / Double(Self.bucketsPerRange)
     }
 
     /// Adds one sample. Samples must arrive in time order; anything not newer than the last is ignored.
-    mutating func add(time t: TimeInterval, interval: TimeInterval, charge: Float, system: Float, battery: Float) {
+    mutating func add(time t: TimeInterval, interval: TimeInterval, charge: Float, system: Float, battery: Float,
+                      acPower: Bool? = nil) {
         if let last = lastTime {
             guard t > last else { return }
-            if t - last > Self.gapFactor * Swift.max(interval, lastInterval) { runs.append([]) }
+            if t - last > Self.gapFactor * Swift.max(interval, lastInterval) { runs.append([]); spanOpen = false }
         } else {
             runs.append([])
         }
         lastTime = t
         lastInterval = interval
+        addPower(acPower, at: t)
 
         let r = runs.count - 1
         let index = Int((t / bucketSeconds).rounded(.down))
@@ -112,11 +140,20 @@ struct BatteryBuckets {
         runs[r][b].battery.add(battery)
     }
 
+    private mutating func addPower(_ ac: Bool?, at t: TimeInterval) {
+        if spanOpen { powerSpans[powerSpans.count - 1].end = t }
+        guard let ac else { spanOpen = false; return }
+        if spanOpen && powerSpans[powerSpans.count - 1].ac == ac { return }
+        powerSpans.append(PowerSpan(ac: ac, start: t, end: t))
+        spanOpen = true
+    }
+
     mutating func add(_ segment: BatterySegment) {
         let start = segment.start.timeIntervalSince1970
         for i in 0..<segment.count {
             add(time: start + Double(i) * segment.interval, interval: segment.interval,
-                charge: segment.chargePct[i], system: segment.systemPowerW[i], battery: segment.batteryPowerW[i])
+                charge: segment.chargePct[i], system: segment.systemPowerW[i], battery: segment.batteryPowerW[i],
+                acPower: i < segment.acPower.count ? segment.acPower[i] : nil)
         }
     }
 
@@ -125,14 +162,22 @@ struct BatteryBuckets {
         add(time: s.timestamp.timeIntervalSince1970, interval: Double(recorded.interval),
             charge: Float(s.chargePct),
             system: Float(s.systemPowerW ?? .nan),
-            battery: Float(s.batteryPowerW ?? .nan))
+            battery: Float(s.batteryPowerW ?? .nan),
+            acPower: s.acPower)
     }
 
-    /// Drops buckets that end before `time`.
+    /// Drops buckets that end before `time` and cuts power spans off at `time`.
     mutating func trim(before time: TimeInterval) {
         let first = Int((time / bucketSeconds).rounded(.down))
         while let run = runs.first, run[run.count - 1].index < first { runs.removeFirst() }
         if let k = runs.first?.firstIndex(where: { $0.index >= first }), k > 0 { runs[0].removeFirst(k) }
+        if let k = powerSpans.firstIndex(where: { $0.end >= time }) {
+            powerSpans.removeFirst(k)
+            powerSpans[0].start = Swift.max(powerSpans[0].start, time)
+        } else {
+            powerSpans = []
+            spanOpen = false
+        }
     }
 
     /// Smallest and largest value of one series across all buckets, for scaling the y axis.

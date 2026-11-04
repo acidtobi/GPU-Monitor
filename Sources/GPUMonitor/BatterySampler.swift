@@ -1,7 +1,7 @@
 import Foundation
 import IOKit
 
-/// One recorded battery tick. These three values are what BatteryStore persists.
+/// One recorded battery tick. These values are what BatteryStore persists.
 struct BatterySample: Equatable {
     let timestamp: Date
     /// State of charge, 0…100.
@@ -10,6 +10,8 @@ struct BatterySample: Equatable {
     let systemPowerW: Double?
     /// Battery power in watts: positive while charging, negative while discharging.
     let batteryPowerW: Double?
+    /// True while a power adapter is connected. nil when unknown (history recorded before v2).
+    let acPower: Bool?
 }
 
 /// Charger state shown next to the live values. Not recorded.
@@ -76,7 +78,8 @@ final class BatterySampler {
             sample: BatterySample(timestamp: timestamp,
                                   chargePct: chargePct,
                                   systemPowerW: systemPowerW,
-                                  batteryPowerW: batteryPowerW),
+                                  batteryPowerW: batteryPowerW,
+                                  acPower: status.externalConnected),
             status: status
         )
     }
