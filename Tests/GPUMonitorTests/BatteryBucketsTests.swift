@@ -128,6 +128,17 @@ final class BatteryBucketsTests: XCTestCase {
         XCTAssertEqual(b.lastTime, t0 + 40)
     }
 
+    func testColumnsKnowTheirSampleTimes() {
+        var b = BatteryBuckets(range: 300, columns: 30)  // 10 s buckets
+        for t in [1.0, 3, 7, 11, 12] { add(&b, t, interval: 5) }
+        for t in [251.0, 252] { add(&b, t, interval: 5) }  // after a gap
+        let cols = b.columns(\.charge, width: 30, windowStart: t0, range: 300)
+
+        XCTAssertEqual(cols.map { $0.map(\.first) }, [[t0 + 1, t0 + 11], [t0 + 251]])
+        XCTAssertEqual(cols.map { $0.map(\.last) }, [[t0 + 7, t0 + 12], [t0 + 252]])
+        XCTAssertEqual(cols[1][0].first - cols[0][1].last, 239, "the gap runs from the last sample to the next")
+    }
+
     func testOutOfOrderAndDuplicateSamplesIgnored() {
         var b = BatteryBuckets(range: 300, columns: 300)
         add(&b, 10, charge: 10)
