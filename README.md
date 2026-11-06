@@ -21,6 +21,8 @@ A lightweight, native macOS menu bar app for real-time GPU utilization monitorin
 
 ![screenshot.png](screenshot.png)
 
+![screenshot-battery.png](screenshot-battery.png)
+
 ## Requirements
 
 - macOS 13.0 (Ventura) or later

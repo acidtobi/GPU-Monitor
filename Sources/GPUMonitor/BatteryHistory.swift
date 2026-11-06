@@ -161,14 +161,20 @@ struct Summary {
 struct BatteryBuckets {
     struct Bucket {
         let index: Int
+        /// Times of the bucket's first and last sample.
+        var first: TimeInterval
+        var last: TimeInterval
         var charge = Summary()
         var system = Summary()
         var battery = Summary()
     }
 
-    /// One pixel column of a chart. `x` is the column's center in pixels from the left edge.
+    /// One pixel column of a chart. `x` is the column's center in pixels from the left edge;
+    /// `first` and `last` are the times of its bucket's first and last sample.
     struct Column {
         let x: Double
+        let first: TimeInterval
+        let last: TimeInterval
         let summary: Summary
     }
 
@@ -307,9 +313,10 @@ struct BatteryBuckets {
         let index = Int((t / bucketSeconds).rounded(.down))
         if runs[r].last?.index != index {
             closeOpen()
-            runs[r].append(Bucket(index: index))
+            runs[r].append(Bucket(index: index, first: t, last: t))
             open = OpenBucket(index: index)
         }
+        runs[r][runs[r].count - 1].last = t
         for s in values.indices { open?.values[s].append(values[s]) }
         open?.dirty = true
     }
@@ -377,7 +384,8 @@ struct BatteryBuckets {
                 let x = ((Double(bucket.index) + 0.5) * bucketSeconds - windowStart) * scale
                 guard x > -1 else { continue }
                 // The newest bucket's center can sit up to half a pixel past the right edge.
-                cols.append(Column(x: Swift.min(x, Double(width) - 0.5), summary: s))
+                cols.append(Column(x: Swift.min(x, Double(width) - 0.5), first: bucket.first, last: bucket.last,
+                                  summary: s))
             }
             if !cols.isEmpty { result.append(cols) }
         }
